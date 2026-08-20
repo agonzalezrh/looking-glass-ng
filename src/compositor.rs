@@ -194,20 +194,17 @@ impl LookingGlass {
                             smithay::utils::Size::new(tex_size.w, tex_size.h),
                         ),
                     );
-                    // Apply a 45-degree rotation to demonstrate 3D transform
                     use cgmath::Deg;
                     use cgmath::Rotation3;
                     visual.transform.rotation = cgmath::Quaternion::from_angle_z(Deg(30.0));
                     let visual_id = visual.id;
                     info.visual_id = Some(visual_id);
-                    let rotation_deg = 45.0f32;
                     self.scene.add(visual);
                     info!(
                         app_id = %info.app_id,
                         title = %info.title,
                         size = ?info.size,
                         visual_id = ?visual_id,
-                        rotation_deg = rotation_deg,
                         "surface mapped"
                     );
                 }
