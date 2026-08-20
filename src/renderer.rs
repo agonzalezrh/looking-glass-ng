@@ -27,7 +27,20 @@ precision mediump float;
 varying vec2 v_uv;
 uniform sampler2D u_tex;
 void main() {
-    gl_FragColor = texture2D(u_tex, v_uv);
+    vec2 uv = v_uv;
+    float b = 0.05;
+    bvec4 edge = bvec4(
+        uv.x < b || uv.x > 1.0 - b,
+        uv.y < b || uv.y > 1.0 - b,
+        false,
+        false
+    );
+    if (any(edge)) {
+        // BRIGHT CYAN border - makes the quad edges visible
+        gl_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
+    } else {
+        gl_FragColor = texture2D(u_tex, uv);
+    }
 }
 ";
 
@@ -58,7 +71,6 @@ impl DrawGl {
         let u_tex = unsafe { gl.GetUniformLocation(program, b"u_tex\0".as_ptr() as *const i8) };
         let mut vbo = 0;
         unsafe { gl.GenBuffers(1, &mut vbo) };
-        // 4 verts: (x, y, u, v)
         let verts: [f32; 16] = [
             -0.5, -0.5, 0.0, 1.0,
              0.5, -0.5, 1.0, 1.0,
@@ -88,7 +100,7 @@ impl DrawGl {
             unsafe { gl.GetShaderiv(s, ffi::INFO_LOG_LENGTH, &mut len) };
             let mut buf = vec![0u8; len as usize];
             unsafe { gl.GetShaderInfoLog(s, len, std::ptr::null_mut(), buf.as_mut_ptr() as *mut i8) };
-            error!("Shader compile error: {}", String::from_utf8_lossy(&buf));
+            error!("Shader error: {}", String::from_utf8_lossy(&buf));
         }
         s
     }
@@ -142,7 +154,6 @@ pub fn render_scene(
         }
     };
 
-    // Clear: dark grey background
     let _ = frame.with_context(|gl| unsafe {
         gl.ClearColor(0.15, 0.15, 0.15, 1.0);
         gl.Clear(ffi::COLOR_BUFFER_BIT);
@@ -153,37 +164,53 @@ pub fn render_scene(
         gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
     });
 
-    // Build orthographic projection and identity view
-    // Maps screen coords to NDC: pixel (0,0) → NDC (-1,1), pixel (w,h) → NDC (1,-1)
-    let proj: [f32; 16] = [
-        2.0/w, 0.0,   0.0, 0.0,
-        0.0,  -2.0/h, 0.0, 0.0,
-        0.0,   0.0,  -1.0, 0.0,
-       -1.0,   1.0,   0.0, 1.0,
-    ];
-
-    // Draw both visuals from the scene
+    // Draw both visuals: left (no rotation) and right (with rotation)
+    // Always draw two quads: one at origin position, one at offset
+    let mut ref_pos: Option<(f32, f32, u32)> = None;
     for visual in scene.iter() {
         let Some(texture) = visual.texture() else { continue };
         let tex_id = texture.tex_id();
         let gw = texture.size().w as f32;
         let gh = texture.size().h as f32;
 
-        // Position: center of visual in pixel coords
+        // Center of visual in pixel coords
         let px = visual.geometry.loc.x as f32 + gw / 2.0;
         let py = visual.geometry.loc.y as f32 + gh / 2.0;
 
-        // Orthographic projection: pixel→NDC, Y up
+        // Projection: orthographic, Y-down (screen coords)
         let proj = cgmath::ortho(0.0, w, h, 0.0, -1000.0, 1000.0);
 
-        // Model: translate to position, rotate+scale from transform
+        // Model: translate to screen position, then apply transform, then scale
         let model = Matrix4::from_translation(Vector3::new(px, py, 0.0))
             * visual.transform.to_matrix()
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
 
         let mvp = proj * model;
-
         let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id));
+
+        if ref_pos.is_none() {
+            ref_pos = Some((px, py, tex_id));
+        }
+    }
+
+    // If there was a visual, also draw an unrotated reference
+    if let Some((px, py, tex_id)) = ref_pos {
+        // Draw the same texture unrotated at a different position
+        let proj = cgmath::ortho(0.0, w, h, 0.0, -1000.0, 1000.0);
+        let ident = Matrix4::from_scale(1.0);
+        // Put the reference at (100, 100)
+        let model = Matrix4::from_translation(Vector3::new(100.0 + 100.0, 100.0 + 100.0, 0.0))
+            * ident
+            * Matrix4::from_nonuniform_scale(100.0, 100.0, 1.0);
+        let mvp = proj * model;
+        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id));
+
+        // Draw a colored reference: solid green square with a red arrow
+        // Using a separate shader would be complex, just log it
+        tracing::info!(
+            "REFERENCE at (100,100) 100x100 NO ROTATION | MAIN at ({:.0},{:.0}) WITH ROTATION",
+            px, py
+        );
     }
 
     drop(frame);
