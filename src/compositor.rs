@@ -1,9 +1,7 @@
 //! Wayland protocol integration and central compositor state.
 
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::ImportMemWl;
-use smithay::backend::renderer::Renderer;
 use smithay::backend::renderer::Texture;
 use smithay::backend::SwapBuffersError;
 use smithay::backend::winit::WinitGraphicsBackend;
@@ -20,11 +18,7 @@ use smithay::reexports::wayland_server::backend::{ClientData, ClientId, Disconne
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Client;
 use smithay::reexports::wayland_server::DisplayHandle;
-use smithay::utils::Point;
-use smithay::utils::Rectangle;
 use smithay::utils::Serial;
-use smithay::utils::Size;
-use smithay::utils::Transform;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::compositor::BufferAssignment;
@@ -40,6 +34,8 @@ use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::shm::ShmHandler;
 use smithay::wayland::shm::ShmState;
+use crate::scene::{Scene, Visual, VisualContent, VisualId};
+use crate::renderer;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -72,7 +68,7 @@ pub struct ToplevelInfo {
     pub app_id: String,
     pub title: String,
     pub lifecycle: SurfaceLifecycle,
-    pub texture: Option<GlesTexture>,
+    pub visual_id: Option<VisualId>,
     pub size: Option<(i32, i32)>,
 }
 
@@ -98,7 +94,7 @@ impl ToplevelInfo {
             wl_surface,
             app_id,
             title,
-            texture: None,
+            visual_id: None,
             size: None,
         }
     }
@@ -122,6 +118,7 @@ pub struct LookingGlass {
     pub shm_state: ShmState,
     pub backend: Option<WinitGraphicsBackend<GlesRenderer>>,
     pub toplevels: Vec<ToplevelInfo>,
+    pub scene: Scene,
 }
 
 impl LookingGlass {
@@ -142,6 +139,7 @@ impl LookingGlass {
             shm_state,
             backend: Some(backend),
             toplevels: Vec::new(),
+            scene: Scene::default(),
         }
     }
 
@@ -189,11 +187,21 @@ impl LookingGlass {
                     info.lifecycle = SurfaceLifecycle::Mapped;
                     let tex_size = texture.size();
                     info.size = Some((tex_size.w, tex_size.h));
-                    info.texture = Some(texture);
+                    let visual = Visual::new(
+                        VisualContent::SurfaceTexture(texture),
+                        smithay::utils::Rectangle::new(
+                            smithay::utils::Point::new(10, 10),
+                            smithay::utils::Size::new(tex_size.w, tex_size.h),
+                        ),
+                    );
+                    let visual_id = visual.id;
+                    info.visual_id = Some(visual_id);
+                    self.scene.add(visual);
                     info!(
                         app_id = %info.app_id,
                         title = %info.title,
                         size = ?info.size,
+                        visual_id = ?visual_id,
                         "surface mapped"
                     );
                 }
@@ -205,63 +213,10 @@ impl LookingGlass {
     }
 
     pub fn render(&mut self) {
-        let window_size = {
-            let Some(backend) = self.backend.as_ref() else {
-                return;
-            };
-            backend.window_size()
-        };
-
         let Some(backend) = self.backend.as_mut() else {
             return;
         };
-
-        fn do_render(
-            backend: &mut WinitGraphicsBackend<GlesRenderer>,
-            toplevels: &[ToplevelInfo],
-            window_size: smithay::utils::Size<i32, smithay::utils::Physical>,
-        ) -> Result<(), SwapBuffersError> {
-            let (renderer, mut target) = backend.bind()?;
-            let mut frame = renderer.render(&mut target, window_size, Transform::Normal)?;
-
-            let mut info_idx = 0;
-            while info_idx < toplevels.len() {
-                let info = &toplevels[info_idx];
-                if info.lifecycle != SurfaceLifecycle::Mapped {
-                    info_idx += 1;
-                    continue;
-                }
-                if let Some(ref texture) = info.texture {
-                    let tex_size = texture.size();
-                    let dest = Rectangle::new(
-                        Point::new(10, 10 + info_idx as i32 * (tex_size.h + 10)),
-                        Size::new(tex_size.w, tex_size.h),
-                    );
-                    let src = Rectangle::new(
-                        Point::new(0.0, 0.0),
-                        Size::new(tex_size.w as f64, tex_size.h as f64),
-                    );
-                    let _ = frame.render_texture_from_to(
-                        texture,
-                        src,
-                        dest,
-                        &[dest],
-                        &[],
-                        Transform::Normal,
-                        1.0,
-                        None,
-                        &[],
-                    );
-                }
-                info_idx += 1;
-            }
-
-            drop(frame);
-            drop(target);
-            backend.submit(None)
-        }
-
-        if let Err(SwapBuffersError::ContextLost(e)) = do_render(backend, &self.toplevels, window_size) {
+        if let Err(SwapBuffersError::ContextLost(e)) = renderer::render_scene(backend, &self.scene) {
             error!(?e, "Context lost");
             self.backend = None;
         }
@@ -361,6 +316,9 @@ impl XdgShellHandler for LookingGlass {
             .position(|t| t.toplevel.wl_surface() == wl_surface)
         {
             let info = self.toplevels.remove(idx);
+            if let Some(vid) = info.visual_id {
+                self.scene.remove(vid);
+            }
             info!(
                 app_id = %info.app_id,
                 title = %info.title,
