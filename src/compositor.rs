@@ -297,6 +297,11 @@ impl LookingGlass {
             FrameResult::Finished => {
                 info!("frame producer finished before registration");
             }
+            FrameResult::Unchanged => {
+                // Producer has a valid state but no new frame — register it anyway
+                // (some producers like KVMFR may connect asynchronously)
+                info!("frame producer registered (no initial frame)");
+            }
         }
     }
 
