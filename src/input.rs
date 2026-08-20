@@ -28,7 +28,7 @@ impl Camera {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
 
-        let forward = Vector3::new(cos_yaw * cos_pitch, sin_pitch, sin_yaw * cos_pitch);
+        let forward = Vector3::new(-sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch);
         let center = self.position + forward;
         Matrix4::look_at_rh(self.position, center, Vector3::new(0.0, 1.0, 0.0))
     }
@@ -39,8 +39,8 @@ impl Camera {
         }
         let step = self.speed * dt;
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
-        let forward = Vector3::new(cos_yaw, 0.0, sin_yaw);
-        let right = Vector3::new(sin_yaw, 0.0, -cos_yaw);
+        let forward = Vector3::new(-sin_yaw, 0.0, -cos_yaw);
+        let right = Vector3::new(cos_yaw, 0.0, -sin_yaw);
 
         match key {
             // W - forward
