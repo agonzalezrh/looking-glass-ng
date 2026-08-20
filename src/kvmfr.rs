@@ -122,28 +122,31 @@ impl IvshmemTransport {
 
         let file = File::open(path).ok()?;
         let size = unsafe { libc::lseek(file.as_raw_fd(), 0, libc::SEEK_END) };
-        if size <= 0 {
-            // kvmfr may not support SEEK_END; try a common size
-            // Real IVSHMEM devices set by QEMU are usually 4MB+64KB or 32MB+64KB
-            for guess in [4227858432, 33619968, 4194304] {
-                let mem = unsafe {
-                    libc::mmap(ptr::null_mut(), guess, libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_SHARED, file.as_raw_fd(), 0)
-                };
-                if mem != libc::MAP_FAILED {
-                    info!(?path, ?guess, "KVMFR device mapped with guessed size");
-                    return Some(LgmpMemoryMapping::new(mem as *mut u8, guess as usize));
-                }
-            }
-            return None;
+        if size > 0 {
+            let size = size as usize;
+            let mem = unsafe {
+                libc::mmap(ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED, file.as_raw_fd(), 0)
+            };
+            if mem == libc::MAP_FAILED { return None; }
+            return Some(LgmpMemoryMapping::new(mem as *mut u8, size));
         }
-        let size = size as usize;
-        let mem = unsafe {
-            libc::mmap(ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED, file.as_raw_fd(), 0)
-        };
-        if mem == libc::MAP_FAILED { return None; }
-        Some(LgmpMemoryMapping::new(mem as *mut u8, size))
+
+        // kvmfr static devices don't support SEEK_END.
+        // The size is determined by the static_size_mb module parameter.
+        // Try common sizes: 4MB, 32MB, 64MB, 128MB
+        for &guess_mb in &[4, 32, 64, 128] {
+            let guess = guess_mb * 1024 * 1024;
+            let mem = unsafe {
+                libc::mmap(ptr::null_mut(), guess, libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED, file.as_raw_fd(), 0)
+            };
+            if mem != libc::MAP_FAILED {
+                info!(?path, size_mb = guess_mb, "KVMFR device mapped (static)");
+                return Some(LgmpMemoryMapping::new(mem as *mut u8, guess));
+            }
+        }
+        None
     }
 }
 
