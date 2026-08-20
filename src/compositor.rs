@@ -187,13 +187,17 @@ impl LookingGlass {
                     info.lifecycle = SurfaceLifecycle::Mapped;
                     let tex_size = texture.size();
                     info.size = Some((tex_size.w, tex_size.h));
-                    let visual = Visual::new(
+                    let mut visual = Visual::new(
                         VisualContent::SurfaceTexture(texture),
                         smithay::utils::Rectangle::new(
                             smithay::utils::Point::new(10, 10),
                             smithay::utils::Size::new(tex_size.w, tex_size.h),
                         ),
                     );
+                    // Apply a 20-degree rotation around Z axis to demonstrate 3D transform
+                    use cgmath::Deg;
+                    use cgmath::Rotation3;
+                    visual.transform.rotation = cgmath::Quaternion::from_angle_z(Deg(20.0));
                     let visual_id = visual.id;
                     info.visual_id = Some(visual_id);
                     self.scene.add(visual);

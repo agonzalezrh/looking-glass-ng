@@ -1,3 +1,8 @@
+use cgmath::Deg;
+use cgmath::Matrix4;
+use cgmath::Quaternion;
+use cgmath::Rotation3;
+use cgmath::Vector3;
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::utils::Rectangle;
 
@@ -14,6 +19,41 @@ impl VisualId {
 }
 
 #[derive(Debug, Clone)]
+pub struct Transform3D {
+    pub position: Vector3<f32>,
+    pub rotation: Quaternion<f32>,
+    pub scale: Vector3<f32>,
+}
+
+impl Transform3D {
+    pub fn identity() -> Self {
+        Transform3D {
+            position: Vector3::new(0.0, 0.0, 0.0),
+            rotation: Quaternion::from_angle_z(Deg(0.0)),
+            scale: Vector3::new(1.0, 1.0, 1.0),
+        }
+    }
+
+    pub fn rotation_angle(&self) -> f32 {
+        use cgmath::Euler;
+        use cgmath::One;
+        let ident = Quaternion::one();
+        if self.rotation == ident {
+            return 0.0;
+        }
+        let euler: Euler<cgmath::Rad<f32>> = self.rotation.into();
+        euler.z.0
+    }
+
+    pub fn to_matrix(&self) -> Matrix4<f32> {
+        let t = Matrix4::from_translation(self.position);
+        let r = Matrix4::from(self.rotation);
+        let s = Matrix4::from_nonuniform_scale(self.scale.x, self.scale.y, self.scale.z);
+        t * r * s
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum VisualContent {
     SurfaceTexture(GlesTexture),
 }
@@ -23,6 +63,7 @@ pub struct Visual {
     pub id: VisualId,
     pub content: VisualContent,
     pub geometry: Rectangle<i32, smithay::utils::Logical>,
+    pub transform: Transform3D,
 }
 
 impl Visual {
@@ -31,6 +72,7 @@ impl Visual {
             id: VisualId::next(),
             content,
             geometry,
+            transform: Transform3D::identity(),
         }
     }
 
