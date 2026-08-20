@@ -1,6 +1,10 @@
+use cgmath::Matrix;
+use cgmath::Matrix4;
+use cgmath::Vector3;
 use smithay::backend::renderer::gles::ffi;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::Renderer;
+use smithay::backend::renderer::Texture;
 use smithay::backend::SwapBuffersError;
 use tracing::error;
 use tracing::warn;
@@ -9,25 +13,30 @@ use crate::scene::Scene;
 
 const QUAD_VS: &str = "\
 attribute vec2 a_pos;
+attribute vec2 a_uv;
 uniform mat4 u_mvp;
+varying vec2 v_uv;
 void main() {
     gl_Position = u_mvp * vec4(a_pos, 0.0, 1.0);
+    v_uv = a_uv;
 }
 ";
 
 const QUAD_FS: &str = "\
 precision mediump float;
-uniform vec4 u_color;
+varying vec2 v_uv;
+uniform sampler2D u_tex;
 void main() {
-    gl_FragColor = u_color;
+    gl_FragColor = texture2D(u_tex, v_uv);
 }
 ";
 
 struct DrawGl {
     program: u32,
     a_pos: u32,
+    a_uv: u32,
     u_mvp: i32,
-    u_color: i32,
+    u_tex: i32,
     vbo: u32,
 }
 
@@ -44,22 +53,24 @@ impl DrawGl {
             gl.DeleteShader(fs);
         }
         let a_pos = unsafe { gl.GetAttribLocation(program, b"a_pos\0".as_ptr() as *const i8) as u32 };
+        let a_uv = unsafe { gl.GetAttribLocation(program, b"a_uv\0".as_ptr() as *const i8) as u32 };
         let u_mvp = unsafe { gl.GetUniformLocation(program, b"u_mvp\0".as_ptr() as *const i8) };
-        let u_color = unsafe { gl.GetUniformLocation(program, b"u_color\0".as_ptr() as *const i8) };
+        let u_tex = unsafe { gl.GetUniformLocation(program, b"u_tex\0".as_ptr() as *const i8) };
         let mut vbo = 0;
         unsafe { gl.GenBuffers(1, &mut vbo) };
-        let verts: [f32; 8] = [
-            -0.5, -0.5,
-             0.5, -0.5,
-            -0.5,  0.5,
-             0.5,  0.5,
+        // 4 verts: (x, y, u, v)
+        let verts: [f32; 16] = [
+            -0.5, -0.5, 0.0, 1.0,
+             0.5, -0.5, 1.0, 1.0,
+            -0.5,  0.5, 0.0, 0.0,
+             0.5,  0.5, 1.0, 0.0,
         ];
         unsafe {
             gl.BindBuffer(ffi::ARRAY_BUFFER, vbo);
             gl.BufferData(ffi::ARRAY_BUFFER, std::mem::size_of_val(&verts) as isize,
                 verts.as_ptr() as *const std::ffi::c_void, ffi::STATIC_DRAW);
         }
-        DrawGl { program, a_pos, u_mvp, u_color, vbo }
+        DrawGl { program, a_pos, a_uv, u_mvp, u_tex, vbo }
     }
 
     fn compile(gl: &ffi::Gles2, kind: u32, src: &str) -> u32 {
@@ -83,22 +94,31 @@ impl DrawGl {
     }
 }
 
-fn draw_quad(
+fn draw_textured_quad(
     gl: &ffi::Gles2,
     draw: &DrawGl,
-    mvp: &[f32; 16],
-    r: f32, g: f32, b: f32,
+    mvp: &Matrix4<f32>,
+    tex_id: u32,
 ) {
     unsafe {
         gl.UseProgram(draw.program);
         gl.UniformMatrix4fv(draw.u_mvp, 1, 0, mvp.as_ptr());
-        gl.Uniform4f(draw.u_color, r, g, b, 1.0);
+        gl.ActiveTexture(ffi::TEXTURE0);
+        gl.BindTexture(ffi::TEXTURE_2D, tex_id);
+        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+        gl.Uniform1i(draw.u_tex, 0);
 
+        let stride = 4 * std::mem::size_of::<f32>() as i32;
         gl.BindBuffer(ffi::ARRAY_BUFFER, draw.vbo);
         gl.EnableVertexAttribArray(draw.a_pos);
-        gl.VertexAttribPointer(draw.a_pos, 2, ffi::FLOAT, 0, 0, std::ptr::null());
+        gl.VertexAttribPointer(draw.a_pos, 2, ffi::FLOAT, 0, stride, std::ptr::null());
+        gl.EnableVertexAttribArray(draw.a_uv);
+        gl.VertexAttribPointer(draw.a_uv, 2, ffi::FLOAT, 0, stride,
+            (2 * std::mem::size_of::<f32>()) as *const std::ffi::c_void);
         gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
         gl.DisableVertexAttribArray(draw.a_pos);
+        gl.DisableVertexAttribArray(draw.a_uv);
     }
 }
 
@@ -142,38 +162,28 @@ pub fn render_scene(
        -1.0,   1.0,   0.0, 1.0,
     ];
 
-    // Draw TWO quads side by side to prove rotation works
-    // Left: unrotated RED square at x=200, y=360 (center of left half)
-    let gw = 200.0_f32;
-    let gh = 200.0_f32;
+    // Draw both visuals from the scene
+    for visual in scene.iter() {
+        let Some(texture) = visual.texture() else { continue };
+        let tex_id = texture.tex_id();
+        let gw = texture.size().w as f32;
+        let gh = texture.size().h as f32;
 
-    // LEFT QUAD: NO ROTATION, RED
-    {
-        let px = 200.0 + gw / 2.0;
-        let py = 360.0 + gh / 2.0;
-        let mut mvp: [f32; 16] = proj;
-        mvp[0]  = 2.0/w * gw;
-        mvp[5]  = -2.0/h * gh;
-        mvp[12] = 2.0/w * px - 1.0;
-        mvp[13] = -2.0/h * py + 1.0;
-        let _ = frame.with_context(|gl| draw_quad(gl, &draw, &mvp, 1.0, 0.0, 0.0));
-    }
+        // Position: center of visual in pixel coords
+        let px = visual.geometry.loc.x as f32 + gw / 2.0;
+        let py = visual.geometry.loc.y as f32 + gh / 2.0;
 
-    // RIGHT QUAD: 30° Z ROTATION, BLUE
-    {
-        let px = 800.0 + gw / 2.0;
-        let py = 360.0 + gh / 2.0;
-        let angle = 30.0_f32.to_radians();
-        let c = angle.cos();
-        let s = angle.sin();
+        // Orthographic projection: pixel→NDC, Y up
+        let proj = cgmath::ortho(0.0, w, h, 0.0, -1000.0, 1000.0);
 
-        let mvp: [f32; 16] = [
-            2.0/w * gw * c,  -2.0/h * gw * s,  0.0, 0.0,
-            2.0/w * gh * -s, -2.0/h * gh * c,  0.0, 0.0,
-            0.0,             0.0,             -1.0, 0.0,
-            2.0/w * px - 1.0, -2.0/h * py + 1.0, 0.0, 1.0,
-        ];
-        let _ = frame.with_context(|gl| draw_quad(gl, &draw, &mvp, 0.0, 0.0, 1.0));
+        // Model: translate to position, rotate+scale from transform
+        let model = Matrix4::from_translation(Vector3::new(px, py, 0.0))
+            * visual.transform.to_matrix()
+            * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
+
+        let mvp = proj * model;
+
+        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id));
     }
 
     drop(frame);
