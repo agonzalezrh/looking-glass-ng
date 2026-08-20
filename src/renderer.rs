@@ -7,7 +7,6 @@ use smithay::backend::renderer::Renderer;
 use smithay::backend::renderer::Texture;
 use smithay::backend::SwapBuffersError;
 use tracing::error;
-use tracing::warn;
 
 use crate::scene::Scene;
 
@@ -138,7 +137,7 @@ fn do_render(
     backend: &mut smithay::backend::winit::WinitGraphicsBackend<GlesRenderer>,
     scene: &Scene,
     window_size: smithay::utils::Size<i32, smithay::utils::Physical>,
-    w: f32, h: f32, aspect: f32,
+    _w: f32, _h: f32, aspect: f32,
 ) -> Result<(), SwapBuffersError> {
     let (renderer, mut target) = backend.bind()?;
     let mut frame = match renderer.render(&mut target, window_size, smithay::utils::Transform::Normal) {
@@ -175,10 +174,12 @@ fn do_render(
         let tex_id = texture.tex_id();
         let gw = texture.size().w as f32;
         let gh = texture.size().h as f32;
-        let px = visual.geometry.loc.x as f32 + gw / 2.0 - w / 2.0;
-        let py = -(visual.geometry.loc.y as f32 + gh / 2.0) + h / 2.0;
-        let model = Matrix4::from_translation(Vector3::new(px, py, 0.0))
-            * visual.transform.to_matrix()
+
+        // Use transform.position for 3D world position
+        // Use geometry size for the quad dimensions
+        let pos = visual.transform.position;
+        let model = Matrix4::from_translation(pos)
+            * Matrix4::from(visual.transform.rotation)
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
         let mvp = proj * view * model;
         let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id));

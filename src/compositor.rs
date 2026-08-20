@@ -175,6 +175,13 @@ impl LookingGlass {
         let Some(wl_buffer) = wl_buffer else {
             return;
         };
+        // Pre-compute position data before borrowing toplevels mutably
+        let window_count = self.toplevels.len();
+        let spread = (window_count as f32 - 1.0) * 150.0;
+        let x = idx as f32 * 300.0 - spread;
+        let z = (idx as f32 - (window_count as f32 - 1.0) / 2.0) * 30.0;
+        let angle_y = (idx as f32 - (window_count as f32 - 1.0) / 2.0) * -20.0;
+
         // Import the buffer using the backend's renderer
         if let Some(backend) = self.backend.as_mut() {
             let renderer = backend.renderer();
@@ -187,16 +194,18 @@ impl LookingGlass {
                     info.lifecycle = SurfaceLifecycle::Mapped;
                     let tex_size = texture.size();
                     info.size = Some((tex_size.w, tex_size.h));
+
                     let mut visual = Visual::new(
                         VisualContent::SurfaceTexture(texture),
                         smithay::utils::Rectangle::new(
-                            smithay::utils::Point::new(540, 260),
+                            smithay::utils::Point::new(0, 0),
                             smithay::utils::Size::new(tex_size.w, tex_size.h),
                         ),
                     );
                     use cgmath::Deg;
                     use cgmath::Rotation3;
-                    visual.transform.rotation = cgmath::Quaternion::from_angle_y(Deg(60.0));
+                    visual.transform.position = cgmath::Vector3::new(x, 0.0, z);
+                    visual.transform.rotation = cgmath::Quaternion::from_angle_y(Deg(angle_y));
                     let visual_id = visual.id;
                     info.visual_id = Some(visual_id);
                     self.scene.add(visual);
@@ -205,6 +214,9 @@ impl LookingGlass {
                         title = %info.title,
                         size = ?info.size,
                         visual_id = ?visual_id,
+                        pos_x = x,
+                        pos_z = z,
+                        angle_y = angle_y,
                         "surface mapped"
                     );
                 }
