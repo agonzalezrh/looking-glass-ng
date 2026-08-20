@@ -175,12 +175,16 @@ impl LookingGlass {
         let Some(wl_buffer) = wl_buffer else {
             return;
         };
-        // Pre-compute position data before borrowing toplevels mutably
+        // All windows at same X=0 to force full overlap.
+        // Only Z depth separates them: Z=-200 (behind), Z=0 (middle), Z=200 (front).
+        // Window in front (Z=200) should fully occlude the others where they overlap.
+        let z_offsets = [-200.0, 0.0, 200.0];
+        let y_angles = [5.0, 0.0, -5.0];
         let window_count = self.toplevels.len();
-        let spread = (window_count as f32 - 1.0) * 150.0;
-        let x = idx as f32 * 300.0 - spread;
-        let z = (idx as f32 - (window_count as f32 - 1.0) / 2.0) * 30.0;
-        let angle_y = (idx as f32 - (window_count as f32 - 1.0) / 2.0) * -20.0;
+        let z = if idx < z_offsets.len() { z_offsets[idx] } else { idx as f32 * 50.0 };
+        let angle_y = if idx < y_angles.len() { y_angles[idx] } else { 0.0 };
+        let spread = (window_count as f32 - 1.0) * 10.0;
+        let x = idx as f32 * 20.0 - spread;
 
         // Import the buffer using the backend's renderer
         if let Some(backend) = self.backend.as_mut() {

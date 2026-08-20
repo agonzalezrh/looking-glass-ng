@@ -155,16 +155,18 @@ fn do_render(
 
     let _ = frame.with_context(|gl| unsafe {
         gl.ClearColor(0.15, 0.15, 0.15, 1.0);
-        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        gl.Clear(ffi::COLOR_BUFFER_BIT | ffi::DEPTH_BUFFER_BIT);
     });
     let _ = frame.with_context(|gl| unsafe {
         gl.Enable(ffi::BLEND);
         gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
+        gl.Enable(ffi::DEPTH_TEST);
+        gl.DepthFunc(ffi::LESS);
     });
 
     let proj = cgmath::perspective(cgmath::Deg(45.0), aspect, 1.0, 10000.0);
     let view = Matrix4::look_at_rh(
-        cgmath::Point3::new(0.0, 0.0, 500.0),
+        cgmath::Point3::new(0.0, 0.0, 800.0),
         cgmath::Point3::new(0.0, 0.0, 0.0),
         Vector3::new(0.0, 1.0, 0.0),
     );
@@ -175,25 +177,12 @@ fn do_render(
         let gw = texture.size().w as f32;
         let gh = texture.size().h as f32;
 
-        // Use transform.position for 3D world position
-        // Use geometry size for the quad dimensions
         let pos = visual.transform.position;
         let model = Matrix4::from_translation(pos)
             * Matrix4::from(visual.transform.rotation)
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
         let mvp = proj * view * model;
         let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id));
-    }
-
-    // Unrotated reference at left
-    if let Some(visual) = scene.visuals.first() {
-        if let Some(texture) = visual.texture() {
-            let model = Matrix4::from_translation(Vector3::new(-300.0, 0.0, 0.0))
-                * Matrix4::from_scale(1.0)
-                * Matrix4::from_nonuniform_scale(100.0, 100.0, 1.0);
-            let mvp = proj * view * model;
-            let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, texture.tex_id()));
-        }
     }
 
     drop(frame);
