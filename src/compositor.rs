@@ -1,7 +1,7 @@
 //! Wayland protocol integration and central compositor state.
 
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::ImportMem;
+use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::ImportMemWl;
 use smithay::backend::renderer::Texture;
 use smithay::backend::SwapBuffersError;
@@ -36,6 +36,7 @@ use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::shm::ShmHandler;
 use smithay::wayland::shm::ShmState;
 use crate::input::Camera;
+use crate::producer::FrameProducer;
 use crate::scene::{Scene, Visual, VisualContent, VisualId};
 use crate::renderer;
 use tracing::error;
@@ -123,7 +124,8 @@ pub struct LookingGlass {
     pub scene: Scene,
     pub camera: Camera,
     pub spatial_mode: bool,
-    external_added: bool,
+    /// Registered frame producers (e.g. animated textures, Looking Glass)
+    producers: Vec<(VisualId, Box<dyn FrameProducer>)>,
 }
 
 impl LookingGlass {
@@ -147,7 +149,7 @@ impl LookingGlass {
             scene: Scene::default(),
             camera: Camera::new(),
             spatial_mode: false,
-            external_added: false,
+            producers: Vec::new(),
         }
     }
 
@@ -267,37 +269,52 @@ impl LookingGlass {
         }
     }
 
+    /// Register a frame producer and create its Visual in the scene.
+    pub fn add_producer(&mut self, mut producer: Box<dyn FrameProducer>) {
+        // The producer starts with a valid texture; create a visual for it
+        let (w, h) = producer.size();
+        let _ = self.backend.as_mut().and_then(|b| {
+            let renderer = b.renderer();
+            producer.update(renderer);
+            let tex = producer.texture().clone();
+            let mut visual = Visual::new(
+                VisualContent::ExternalTexture(tex),
+                smithay::utils::Rectangle::new(
+                    smithay::utils::Point::new(0, 0),
+                    smithay::utils::Size::new(w as i32, h as i32),
+                ),
+            );
+            visual.transform.position = cgmath::Vector3::new(0.0, 200.0, 0.0);
+            let vid = visual.id;
+            self.scene.add(visual);
+            self.producers.push((vid, producer));
+            info!(visual_id = ?vid, width = w, height = h, "frame producer registered");
+            Some(())
+        });
+    }
+
     pub fn render(&mut self) {
-        if !self.external_added {
-            self.external_added = true;
-            // Generate checkerboard pixels in software
-            let w = 256u32;
-            let h = 256u32;
-            let mut pixels = Vec::with_capacity((w * h * 4) as usize);
-            for y in 0..h {
-                for x in 0..w {
-                    let bright = ((x / 32) + (y / 32)) % 2 == 0;
-                    if bright { pixels.extend_from_slice(&[255, 255, 255, 255]); }
-                    else { pixels.extend_from_slice(&[0, 0, 0, 255]); }
+        // Step 1: Update frame producers using a separate borrow scope
+        let updates: Vec<(VisualId, GlesTexture)> = {
+            let backend = match self.backend.as_mut() {
+                Some(b) => b,
+                None => return,
+            };
+            let renderer = backend.renderer();
+            self.producers.iter_mut().filter_map(|(vid, producer)| {
+                if producer.update(renderer) {
+                    Some((*vid, producer.texture().clone()))
+                } else {
+                    None
                 }
-            }
-            // Import as GPU texture (borrow backend separately)
-            let tex_result = self.backend.as_mut().and_then(|b| {
-                let r = b.renderer();
-                r.import_memory(&pixels, smithay::backend::allocator::Fourcc::Abgr8888,
-                    (w as i32, h as i32).into(), false).ok()
-            });
-            if let Some(texture) = tex_result {
-                let mut visual = Visual::new(
-                    VisualContent::ExternalTexture(texture),
-                    smithay::utils::Rectangle::new(
-                        smithay::utils::Point::new(0, 0),
-                        smithay::utils::Size::new(w as i32, h as i32),
-                    ),
-                );
-                visual.transform.position = cgmath::Vector3::new(0.0, 200.0, 0.0);
-                self.scene.add(visual);
-                info!("external checkerboard visual added at y=200");
+            }).collect()
+        };
+        // Apply texture updates to Visuals
+        for (vid, tex) in updates {
+            if let Some(visual) = self.scene.get_mut(vid) {
+                if let Some(dst) = visual.texture_mut() {
+                    *dst = tex;
+                }
             }
         }
 

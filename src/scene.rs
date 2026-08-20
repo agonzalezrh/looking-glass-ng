@@ -83,6 +83,12 @@ impl Visual {
             VisualContent::WaylandSurface(t) | VisualContent::ExternalTexture(t) => Some(t),
         }
     }
+
+    pub fn texture_mut(&mut self) -> Option<&mut GlesTexture> {
+        match &mut self.content {
+            VisualContent::WaylandSurface(t) | VisualContent::ExternalTexture(t) => Some(t),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
