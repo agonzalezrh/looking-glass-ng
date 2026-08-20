@@ -1,0 +1,17 @@
+[package]
+name = "looking-glass-ng"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A spatial Wayland compositor inspired by Project Looking Glass"
+license = "MIT"
+
+[dependencies]
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_winit",
+    "wayland_frontend",
+    "desktop",
+    "renderer_gl",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
