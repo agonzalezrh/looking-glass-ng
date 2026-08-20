@@ -9,6 +9,7 @@ mod window;
 use std::sync::Arc;
 
 use compositor::{ClientState, LookingGlass};
+use smithay::backend::input::{AbsolutePositionEvent, InputEvent, KeyboardKeyEvent};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::reexports::calloop::generic::Generic;
@@ -80,7 +81,19 @@ fn main() {
                 state.render();
             }
             WinitEvent::Input(event) => {
-                let _ = event;
+                match event {
+                    InputEvent::Keyboard { event } => {
+                        let key = event.key_code();
+                        let pressed = event.state() == smithay::backend::input::KeyState::Pressed;
+                        state.camera.handle_key(key.into(), pressed, 1.0);
+                    }
+                    InputEvent::PointerMotionAbsolute { event } => {
+                        let x = event.x();
+                        let y = event.y();
+                        state.camera.handle_mouse_absolute(x, y);
+                    }
+                    _ => {}
+                }
                 state.render();
             }
             WinitEvent::CloseRequested => {

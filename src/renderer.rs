@@ -1,6 +1,5 @@
 use cgmath::Matrix;
 use cgmath::Matrix4;
-use cgmath::Vector3;
 use smithay::backend::renderer::gles::ffi;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::Renderer;
@@ -136,6 +135,7 @@ fn draw_textured_quad(
 fn do_render(
     backend: &mut smithay::backend::winit::WinitGraphicsBackend<GlesRenderer>,
     scene: &Scene,
+    view: &Matrix4<f32>,
     window_size: smithay::utils::Size<i32, smithay::utils::Physical>,
     _w: f32, _h: f32, aspect: f32,
 ) -> Result<(), SwapBuffersError> {
@@ -165,11 +165,6 @@ fn do_render(
     });
 
     let proj = cgmath::perspective(cgmath::Deg(45.0), aspect, 1.0, 10000.0);
-    let view = Matrix4::look_at_rh(
-        cgmath::Point3::new(0.0, 0.0, 800.0),
-        cgmath::Point3::new(0.0, 0.0, 0.0),
-        Vector3::new(0.0, 1.0, 0.0),
-    );
 
     for visual in scene.iter() {
         let Some(texture) = visual.texture() else { continue };
@@ -193,13 +188,14 @@ fn do_render(
 pub fn render_scene(
     backend: &mut smithay::backend::winit::WinitGraphicsBackend<GlesRenderer>,
     scene: &Scene,
+    view: &Matrix4<f32>,
 ) -> Result<(), SwapBuffersError> {
     let window_size = backend.window_size();
     let w = window_size.w as f32;
     let h = window_size.h as f32;
     let aspect = w / h;
 
-    let r = do_render(backend, scene, window_size, w, h, aspect);
+    let r = do_render(backend, scene, view, window_size, w, h, aspect);
     if let Err(SwapBuffersError::ContextLost(e)) = r {
         error!(?e, "Context lost");
     }

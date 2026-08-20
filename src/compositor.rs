@@ -34,6 +34,7 @@ use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::shm::ShmHandler;
 use smithay::wayland::shm::ShmState;
+use crate::input::Camera;
 use crate::scene::{Scene, Visual, VisualContent, VisualId};
 use crate::renderer;
 use tracing::error;
@@ -119,6 +120,7 @@ pub struct LookingGlass {
     pub backend: Option<WinitGraphicsBackend<GlesRenderer>>,
     pub toplevels: Vec<ToplevelInfo>,
     pub scene: Scene,
+    pub camera: Camera,
 }
 
 impl LookingGlass {
@@ -140,6 +142,7 @@ impl LookingGlass {
             backend: Some(backend),
             toplevels: Vec::new(),
             scene: Scene::default(),
+            camera: Camera::new(),
         }
     }
 
@@ -235,7 +238,8 @@ impl LookingGlass {
         let Some(backend) = self.backend.as_mut() else {
             return;
         };
-        if let Err(SwapBuffersError::ContextLost(e)) = renderer::render_scene(backend, &self.scene) {
+        let view = self.camera.view_matrix();
+        if let Err(SwapBuffersError::ContextLost(e)) = renderer::render_scene(backend, &self.scene, &view) {
             error!(?e, "Context lost");
             self.backend = None;
         }
