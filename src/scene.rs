@@ -35,14 +35,13 @@ impl Transform3D {
     }
 
     pub fn rotation_angle(&self) -> f32 {
-        use cgmath::Euler;
-        use cgmath::One;
-        let ident = Quaternion::one();
-        if self.rotation == ident {
+        use cgmath::InnerSpace;
+        let s = self.rotation.s;
+        let len = self.rotation.v.magnitude();
+        if len < 1e-6 {
             return 0.0;
         }
-        let euler: Euler<cgmath::Rad<f32>> = self.rotation.into();
-        euler.z.0
+        2.0 * s.acos()
     }
 
     pub fn to_matrix(&self) -> Matrix4<f32> {
