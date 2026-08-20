@@ -121,6 +121,7 @@ pub struct LookingGlass {
     pub toplevels: Vec<ToplevelInfo>,
     pub scene: Scene,
     pub camera: Camera,
+    pub spatial_mode: bool,
 }
 
 impl LookingGlass {
@@ -143,6 +144,7 @@ impl LookingGlass {
             toplevels: Vec::new(),
             scene: Scene::default(),
             camera: Camera::new(),
+            spatial_mode: false,
         }
     }
 
@@ -238,8 +240,24 @@ impl LookingGlass {
         let Some(backend) = self.backend.as_mut() else {
             return;
         };
+        if self.spatial_mode {
+            // Spatial mode: camera back for overview
+            self.camera.speed = 30.0;
+            // Camera stays where user navigated it
+        } else {
+            // Normal mode: snap camera close and center for 2D view
+            self.camera.speed = 5.0;
+            self.camera.position = cgmath::Point3::new(0.0, 0.0, 500.0);
+            self.camera.yaw = 0.0;
+            self.camera.pitch = 0.0;
+        }
         let view = self.camera.view_matrix();
-        if let Err(SwapBuffersError::ContextLost(e)) = renderer::render_scene(backend, &self.scene, &view) {
+        let proj = if self.spatial_mode {
+            cgmath::perspective(cgmath::Deg(45.0), 1280.0/720.0, 1.0, 10000.0)
+        } else {
+            cgmath::ortho(-640.0, 640.0, -360.0, 360.0, -1000.0, 1000.0)
+        };
+        if let Err(SwapBuffersError::ContextLost(e)) = renderer::render_scene(backend, &self.scene, &view, &proj) {
             error!(?e, "Context lost");
             self.backend = None;
         }

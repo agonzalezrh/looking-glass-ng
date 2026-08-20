@@ -136,8 +136,9 @@ fn do_render(
     backend: &mut smithay::backend::winit::WinitGraphicsBackend<GlesRenderer>,
     scene: &Scene,
     view: &Matrix4<f32>,
+    proj: &Matrix4<f32>,
     window_size: smithay::utils::Size<i32, smithay::utils::Physical>,
-    _w: f32, _h: f32, aspect: f32,
+    _w: f32, _h: f32,
 ) -> Result<(), SwapBuffersError> {
     let (renderer, mut target) = backend.bind()?;
     let mut frame = match renderer.render(&mut target, window_size, smithay::utils::Transform::Normal) {
@@ -164,8 +165,6 @@ fn do_render(
         gl.DepthFunc(ffi::LESS);
     });
 
-    let proj = cgmath::perspective(cgmath::Deg(45.0), aspect, 1.0, 10000.0);
-
     for visual in scene.iter() {
         let Some(texture) = visual.texture() else { continue };
         let tex_id = texture.tex_id();
@@ -189,13 +188,13 @@ pub fn render_scene(
     backend: &mut smithay::backend::winit::WinitGraphicsBackend<GlesRenderer>,
     scene: &Scene,
     view: &Matrix4<f32>,
+    proj: &Matrix4<f32>,
 ) -> Result<(), SwapBuffersError> {
     let window_size = backend.window_size();
     let w = window_size.w as f32;
     let h = window_size.h as f32;
-    let aspect = w / h;
 
-    let r = do_render(backend, scene, view, window_size, w, h, aspect);
+    let r = do_render(backend, scene, view, proj, window_size, w, h);
     if let Err(SwapBuffersError::ContextLost(e)) = r {
         error!(?e, "Context lost");
     }

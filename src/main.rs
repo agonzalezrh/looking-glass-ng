@@ -85,6 +85,11 @@ fn main() {
                     InputEvent::Keyboard { event } => {
                         let key = event.key_code();
                         let pressed = event.state() == smithay::backend::input::KeyState::Pressed;
+                        // Tab key (keycode 23) toggles spatial mode
+                        if u32::from(key) == 23 && pressed {
+                            state.spatial_mode = !state.spatial_mode;
+                            tracing::info!(spatial_mode = state.spatial_mode, "mode toggled");
+                        }
                         state.camera.handle_key(key.into(), pressed, 1.0);
                     }
                     InputEvent::PointerMotionAbsolute { event } => {
