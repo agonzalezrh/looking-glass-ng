@@ -190,7 +190,7 @@ impl LookingGlass {
                     let mut visual = Visual::new(
                         VisualContent::SurfaceTexture(texture),
                         smithay::utils::Rectangle::new(
-                            smithay::utils::Point::new(10, 10),
+                            smithay::utils::Point::new(540, 260),
                             smithay::utils::Size::new(tex_size.w, tex_size.h),
                         ),
                     );
