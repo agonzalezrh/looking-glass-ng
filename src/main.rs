@@ -2,6 +2,7 @@ mod backend;
 mod compositor;
 mod config;
 mod input;
+mod kvmfr;
 mod producer;
 mod renderer;
 mod scene;
@@ -54,6 +55,11 @@ fn main() {
     ) {
         state.add_producer(Box::new(prod));
     }
+
+    // Register the KVMFR Looking Glass frame producer
+    // This will gracefully report "no device" if /dev/kvmfrN is absent
+    // or if liblgmp is not linked.
+    state.add_producer(Box::new(kvmfr::KvmfrFrameProducer::new()));
 
     // Wayland socket listener
     let source = ListeningSocketSource::new_auto().expect("Failed to create listening socket");
