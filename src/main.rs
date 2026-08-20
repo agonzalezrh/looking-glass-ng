@@ -9,6 +9,7 @@ mod window;
 use std::sync::Arc;
 
 use compositor::{ClientState, LookingGlass};
+use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::PostAction;
@@ -36,7 +37,11 @@ fn main() {
     let display: Display<LookingGlass> = Display::new().expect("Failed to create Wayland display");
     let display_handle = display.handle();
 
-    let mut state = LookingGlass::new(&display_handle);
+    // Initialize the winit backend
+    let (backend, winit_source) =
+        winit::init::<GlesRenderer>().expect("Failed to initialize winit backend");
+
+    let mut state = LookingGlass::new(&display_handle, backend);
 
     // Wayland socket listener
     let source = ListeningSocketSource::new_auto().expect("Failed to create listening socket");
@@ -58,30 +63,29 @@ fn main() {
         .insert_source(
             Generic::new(display, Interest::READ, Mode::Level),
             |_, display, state| {
-                // Safety: we do not drop the display and the callback is sequential
                 let inner = unsafe { display.get_mut() };
                 let _ = inner.dispatch_clients(state);
                 let _ = inner.flush_clients();
+                state.render();
                 Ok(PostAction::Continue)
             },
         )
         .expect("Failed to init wayland server source");
 
-    // Winit backend
-    let (_backend, winit_source) =
-        winit::init::<smithay::backend::renderer::gles::GlesRenderer>()
-            .expect("Failed to initialize winit backend");
-
+    // Winit event source + rendering
     handle
-        .insert_source(winit_source, move |event, _, _state| match event {
+        .insert_source(winit_source, |event, _, state| match event {
             WinitEvent::Resized { size, .. } => {
                 tracing::debug!("Window resized to {:?}", size);
+                state.render();
             }
             WinitEvent::Input(event) => {
                 let _ = event;
+                state.render();
             }
             WinitEvent::CloseRequested => {
                 tracing::info!("Close requested, shutting down");
+                state.backend.take();
             }
             _ => {}
         })

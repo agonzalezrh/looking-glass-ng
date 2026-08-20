@@ -1,5 +1,12 @@
 //! Wayland protocol integration and central compositor state.
 
+use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::GlesTexture;
+use smithay::backend::renderer::ImportMemWl;
+use smithay::backend::renderer::Renderer;
+use smithay::backend::renderer::Texture;
+use smithay::backend::SwapBuffersError;
+use smithay::backend::winit::WinitGraphicsBackend;
 use smithay::delegate_compositor;
 use smithay::delegate_seat;
 use smithay::delegate_shm;
@@ -13,7 +20,11 @@ use smithay::reexports::wayland_server::backend::{ClientData, ClientId, Disconne
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Client;
 use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::utils::Point;
+use smithay::utils::Rectangle;
 use smithay::utils::Serial;
+use smithay::utils::Size;
+use smithay::utils::Transform;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::compositor::BufferAssignment;
@@ -29,7 +40,9 @@ use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::shm::ShmHandler;
 use smithay::wayland::shm::ShmState;
+use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 #[derive(Debug, Default)]
 pub struct ClientState {
@@ -59,24 +72,25 @@ pub struct ToplevelInfo {
     pub app_id: String,
     pub title: String,
     pub lifecycle: SurfaceLifecycle,
+    pub texture: Option<GlesTexture>,
+    pub size: Option<(i32, i32)>,
 }
 
 impl ToplevelInfo {
     fn new(toplevel: ToplevelSurface) -> Self {
         let wl_surface = toplevel.wl_surface().clone();
-        let title = with_states(&wl_surface, |states| {
-            states
+        let (title, app_id) = with_states(&wl_surface, |states| {
+            let title = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
                 .map(|attrs| attrs.lock().unwrap().title.clone().unwrap_or_default())
-                .unwrap_or_default()
-        });
-        let app_id = with_states(&wl_surface, |states| {
-            states
+                .unwrap_or_default();
+            let app_id = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
                 .map(|attrs| attrs.lock().unwrap().app_id.clone().unwrap_or_default())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (title, app_id)
         });
         ToplevelInfo {
             lifecycle: SurfaceLifecycle::Created,
@@ -84,6 +98,8 @@ impl ToplevelInfo {
             wl_surface,
             app_id,
             title,
+            texture: None,
+            size: None,
         }
     }
 
@@ -104,11 +120,15 @@ pub struct LookingGlass {
     pub xdg_shell_state: XdgShellState,
     pub seat_state: SeatState<Self>,
     pub shm_state: ShmState,
+    pub backend: Option<WinitGraphicsBackend<GlesRenderer>>,
     pub toplevels: Vec<ToplevelInfo>,
 }
 
 impl LookingGlass {
-    pub fn new(display_handle: &DisplayHandle) -> Self {
+    pub fn new(
+        display_handle: &DisplayHandle,
+        backend: WinitGraphicsBackend<GlesRenderer>,
+    ) -> Self {
         let compositor_state = CompositorState::new::<Self>(display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(display_handle);
         let shm_state = ShmState::new::<Self>(display_handle, vec![]);
@@ -120,6 +140,7 @@ impl LookingGlass {
             xdg_shell_state,
             seat_state,
             shm_state,
+            backend: Some(backend),
             toplevels: Vec::new(),
         }
     }
@@ -135,27 +156,114 @@ impl LookingGlass {
     }
 
     fn handle_commit(&mut self, surface: &WlSurface) {
-        let Some(info) = self.find_toplevel(surface) else {
+        let idx = self
+            .toplevels
+            .iter()
+            .position(|t| t.toplevel.wl_surface() == surface);
+        let Some(idx) = idx else {
             return;
         };
-        if info.lifecycle != SurfaceLifecycle::Configured {
+        if self.toplevels[idx].lifecycle != SurfaceLifecycle::Configured {
             return;
         }
-        let has_buffer = with_states(surface, |states| {
+        let wl_buffer = with_states(surface, |states| {
             let mut cached = states.cached_state.get::<SurfaceAttributes>();
             let attrs = cached.current();
-            attrs
-                .buffer
-                .as_ref()
-                .is_some_and(|b| matches!(b, BufferAssignment::NewBuffer(_)))
+            match &attrs.buffer {
+                Some(BufferAssignment::NewBuffer(buf)) => Some(buf.clone()),
+                _ => None,
+            }
         });
-        if has_buffer {
-            info.lifecycle = SurfaceLifecycle::Mapped;
-            info!(
-                app_id = %info.app_id,
-                title = %info.title,
-                "surface mapped"
-            );
+        let Some(wl_buffer) = wl_buffer else {
+            return;
+        };
+        // Import the buffer using the backend's renderer
+        if let Some(backend) = self.backend.as_mut() {
+            let renderer = backend.renderer();
+            let result = with_states(surface, |states| {
+                renderer.import_shm_buffer(&wl_buffer, Some(states), &[])
+            });
+            match result {
+                Ok(texture) => {
+                    let info = &mut self.toplevels[idx];
+                    info.lifecycle = SurfaceLifecycle::Mapped;
+                    let tex_size = texture.size();
+                    info.size = Some((tex_size.w, tex_size.h));
+                    info.texture = Some(texture);
+                    info!(
+                        app_id = %info.app_id,
+                        title = %info.title,
+                        size = ?info.size,
+                        "surface mapped"
+                    );
+                }
+                Err(e) => {
+                    warn!(?e, "failed to import SHM buffer");
+                }
+            }
+        }
+    }
+
+    pub fn render(&mut self) {
+        let window_size = {
+            let Some(backend) = self.backend.as_ref() else {
+                return;
+            };
+            backend.window_size()
+        };
+
+        let Some(backend) = self.backend.as_mut() else {
+            return;
+        };
+
+        fn do_render(
+            backend: &mut WinitGraphicsBackend<GlesRenderer>,
+            toplevels: &[ToplevelInfo],
+            window_size: smithay::utils::Size<i32, smithay::utils::Physical>,
+        ) -> Result<(), SwapBuffersError> {
+            let (renderer, mut target) = backend.bind()?;
+            let mut frame = renderer.render(&mut target, window_size, Transform::Normal)?;
+
+            let mut info_idx = 0;
+            while info_idx < toplevels.len() {
+                let info = &toplevels[info_idx];
+                if info.lifecycle != SurfaceLifecycle::Mapped {
+                    info_idx += 1;
+                    continue;
+                }
+                if let Some(ref texture) = info.texture {
+                    let tex_size = texture.size();
+                    let dest = Rectangle::new(
+                        Point::new(10, 10 + info_idx as i32 * (tex_size.h + 10)),
+                        Size::new(tex_size.w, tex_size.h),
+                    );
+                    let src = Rectangle::new(
+                        Point::new(0.0, 0.0),
+                        Size::new(tex_size.w as f64, tex_size.h as f64),
+                    );
+                    let _ = frame.render_texture_from_to(
+                        texture,
+                        src,
+                        dest,
+                        &[dest],
+                        &[],
+                        Transform::Normal,
+                        1.0,
+                        None,
+                        &[],
+                    );
+                }
+                info_idx += 1;
+            }
+
+            drop(frame);
+            drop(target);
+            backend.submit(None)
+        }
+
+        if let Err(SwapBuffersError::ContextLost(e)) = do_render(backend, &self.toplevels, window_size) {
+            error!(?e, "Context lost");
+            self.backend = None;
         }
     }
 }
@@ -247,7 +355,11 @@ impl XdgShellHandler for LookingGlass {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface();
-        if let Some(idx) = self.toplevels.iter().position(|t| t.toplevel.wl_surface() == wl_surface) {
+        if let Some(idx) = self
+            .toplevels
+            .iter()
+            .position(|t| t.toplevel.wl_surface() == wl_surface)
+        {
             let info = self.toplevels.remove(idx);
             info!(
                 app_id = %info.app_id,
@@ -288,7 +400,10 @@ impl ShmHandler for LookingGlass {
 }
 
 impl BufferHandler for LookingGlass {
-    fn buffer_destroyed(&mut self, _buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer) {
+    fn buffer_destroyed(
+        &mut self,
+        _buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+    ) {
     }
 }
 
