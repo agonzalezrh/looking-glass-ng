@@ -196,7 +196,7 @@ impl LookingGlass {
                     );
                     use cgmath::Deg;
                     use cgmath::Rotation3;
-                    visual.transform.rotation = cgmath::Quaternion::from_angle_z(Deg(30.0));
+                    visual.transform.rotation = cgmath::Quaternion::from_angle_y(Deg(60.0));
                     let visual_id = visual.id;
                     info.visual_id = Some(visual_id);
                     self.scene.add(visual);

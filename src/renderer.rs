@@ -134,17 +134,17 @@ fn draw_textured_quad(
     }
 }
 
-pub fn render_scene(
+fn do_render(
     backend: &mut smithay::backend::winit::WinitGraphicsBackend<GlesRenderer>,
     scene: &Scene,
+    window_size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    w: f32, h: f32, aspect: f32,
 ) -> Result<(), SwapBuffersError> {
-    let window_size = backend.window_size();
-    let w = window_size.w as f32;
-    let h = window_size.h as f32;
-
     let (renderer, mut target) = backend.bind()?;
-    let mut frame = renderer.render(&mut target, window_size, smithay::utils::Transform::Normal)
-        .map_err(|_| SwapBuffersError::AlreadySwapped)?;
+    let mut frame = match renderer.render(&mut target, window_size, smithay::utils::Transform::Normal) {
+        Ok(f) => f,
+        Err(_) => return Ok(()),
+    };
 
     let draw = match frame.with_context(|gl| DrawGl::new(gl)) {
         Ok(d) => d,
@@ -158,69 +158,60 @@ pub fn render_scene(
         gl.ClearColor(0.15, 0.15, 0.15, 1.0);
         gl.Clear(ffi::COLOR_BUFFER_BIT);
     });
-
     let _ = frame.with_context(|gl| unsafe {
         gl.Enable(ffi::BLEND);
         gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
     });
 
-    // Draw both visuals: left (no rotation) and right (with rotation)
-    // Always draw two quads: one at origin position, one at offset
-    let mut ref_pos: Option<(f32, f32, u32)> = None;
+    let proj = cgmath::perspective(cgmath::Deg(45.0), aspect, 1.0, 10000.0);
+    let view = Matrix4::look_at_rh(
+        cgmath::Point3::new(0.0, 0.0, 500.0),
+        cgmath::Point3::new(0.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    );
+
     for visual in scene.iter() {
         let Some(texture) = visual.texture() else { continue };
         let tex_id = texture.tex_id();
         let gw = texture.size().w as f32;
         let gh = texture.size().h as f32;
-
-        // Center of visual in pixel coords
-        let px = visual.geometry.loc.x as f32 + gw / 2.0;
-        let py = visual.geometry.loc.y as f32 + gh / 2.0;
-
-        // Projection: orthographic, Y-down (screen coords)
-        let proj = cgmath::ortho(0.0, w, h, 0.0, -1000.0, 1000.0);
-
-        // Model: translate to screen position, then apply transform, then scale
+        let px = visual.geometry.loc.x as f32 + gw / 2.0 - w / 2.0;
+        let py = -(visual.geometry.loc.y as f32 + gh / 2.0) + h / 2.0;
         let model = Matrix4::from_translation(Vector3::new(px, py, 0.0))
             * visual.transform.to_matrix()
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
-
-        let mvp = proj * model;
+        let mvp = proj * view * model;
         let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id));
-
-        if ref_pos.is_none() {
-            ref_pos = Some((px, py, tex_id));
-        }
     }
 
-    // If there was a visual, also draw an unrotated reference
-    if let Some((px, py, tex_id)) = ref_pos {
-        // Draw the same texture unrotated at a different position
-        let proj = cgmath::ortho(0.0, w, h, 0.0, -1000.0, 1000.0);
-        let ident = Matrix4::from_scale(1.0);
-        // Put the reference at (100, 100)
-        let model = Matrix4::from_translation(Vector3::new(100.0 + 100.0, 100.0 + 100.0, 0.0))
-            * ident
-            * Matrix4::from_nonuniform_scale(100.0, 100.0, 1.0);
-        let mvp = proj * model;
-        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id));
-
-        // Draw a colored reference: solid green square with a red arrow
-        // Using a separate shader would be complex, just log it
-        tracing::info!(
-            "REFERENCE at (100,100) 100x100 NO ROTATION | MAIN at ({:.0},{:.0}) WITH ROTATION",
-            px, py
-        );
+    // Unrotated reference at left
+    if let Some(visual) = scene.visuals.first() {
+        if let Some(texture) = visual.texture() {
+            let model = Matrix4::from_translation(Vector3::new(-300.0, 0.0, 0.0))
+                * Matrix4::from_scale(1.0)
+                * Matrix4::from_nonuniform_scale(100.0, 100.0, 1.0);
+            let mvp = proj * view * model;
+            let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, texture.tex_id()));
+        }
     }
 
     drop(frame);
     drop(target);
+    backend.submit(None)
+}
 
-    if let Err(e) = backend.submit(None) {
-        warn!(?e, "Submit failed");
-        if matches!(e, SwapBuffersError::ContextLost(_)) {
-            return Err(e);
-        }
+pub fn render_scene(
+    backend: &mut smithay::backend::winit::WinitGraphicsBackend<GlesRenderer>,
+    scene: &Scene,
+) -> Result<(), SwapBuffersError> {
+    let window_size = backend.window_size();
+    let w = window_size.w as f32;
+    let h = window_size.h as f32;
+    let aspect = w / h;
+
+    let r = do_render(backend, scene, window_size, w, h, aspect);
+    if let Err(SwapBuffersError::ContextLost(e)) = r {
+        error!(?e, "Context lost");
     }
     Ok(())
 }
