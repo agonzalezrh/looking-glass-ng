@@ -117,10 +117,10 @@ impl IvshmemTransport {
     }
 
     fn open_path(path: &std::path::Path) -> Option<LgmpMemoryMapping> {
-        use std::fs::File;
+        use std::fs::OpenOptions;
         use std::os::unix::io::AsRawFd;
 
-        let file = File::open(path).ok()?;
+        let file = OpenOptions::new().read(true).write(true).open(path).ok()?;
         let size = unsafe { libc::lseek(file.as_raw_fd(), 0, libc::SEEK_END) };
         if size > 0 {
             let size = size as usize;
@@ -200,13 +200,13 @@ impl KvmfrFrameProducer {
         let mut client_id = 0u32;
         let mut remote_ver = 0u32;
         let mut session_ok = false;
-        for _ in 0..30 {
+        for _ in 0..100 {
             let mut udata_size = 0u32;
             let mut udata: *mut u8 = ptr::null_mut();
             if unsafe { ffi::lgmpClientSessionInit(client, &mut udata_size, &mut udata,
                 &mut client_id, &mut remote_ver) } == 0
             { session_ok = true; break; }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
         if !session_ok {
             warn!("lgmpClientSessionInit failed");
