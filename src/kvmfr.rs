@@ -1,7 +1,12 @@
 //! Looking Glass KVMFR/LGMP frame producer.
+//!
+//! Pluggable transport: tries IvshmemTransport first, then PosixShmTransport,
+//! then falls back to simulated frames. The LGMP client + FrameProducer
+//! are independent of which transport is active.
 
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
+use std::path::PathBuf;
 use std::ptr;
 
 use smithay::backend::allocator::Fourcc;
@@ -29,9 +34,7 @@ mod ffi {
     }
 
     extern "C" {
-        pub fn lgmpClientInit(
-            mem: *mut c_void, size: usize, result: *mut *mut LGMPClient,
-        ) -> i32;
+        pub fn lgmpClientInit(mem: *mut c_void, size: usize, result: *mut *mut LGMPClient) -> i32;
         pub fn lgmpClientFree(client: *mut *mut LGMPClient);
         pub fn lgmpClientSessionInit(
             client: *mut LGMPClient, udata_size: *mut u32, udata: *mut *mut u8,
@@ -41,24 +44,40 @@ mod ffi {
             client: *mut LGMPClient, queue_id: u32, result: *mut *mut LGMPClientQueue,
         ) -> i32;
         pub fn lgmpClientAdvanceToLast(queue: *mut LGMPClientQueue) -> i32;
-        pub fn lgmpClientProcess(
-            queue: *mut LGMPClientQueue, result: *mut LGMPMessage,
-        ) -> i32;
+        pub fn lgmpClientProcess(queue: *mut LGMPClientQueue, result: *mut LGMPMessage) -> i32;
         pub fn lgmpClientMessageDone(queue: *mut LGMPClientQueue) -> i32;
     }
 }
 
-// ── POSIX SHM transport (keeps mapping alive) ─────────────────────────
+// ── Transport abstraction ─────────────────────────────────────────────
+// A transport provides the mapped memory and path name for LGMP.
+// The mapping must stay alive for the LGMP client's lifetime.
 
-struct ShmMapping {
+struct LgmpMemoryMapping {
     mem: *mut u8,
     size: usize,
-    fd: RawFd,
-    name: CString,
 }
 
-impl ShmMapping {
-    fn open(name: &str) -> Option<Self> {
+impl LgmpMemoryMapping {
+    fn new(mem: *mut u8, size: usize) -> Self {
+        LgmpMemoryMapping { mem, size }
+    }
+
+    fn ptr(&self) -> *mut libc::c_void {
+        self.mem as *mut libc::c_void
+    }
+
+    fn len(&self) -> usize {
+        self.size
+    }
+}
+
+// ── POSIX SHM transport (for testing without KVMFR hardware) ──────────
+
+struct PosixShmTransport;
+
+impl PosixShmTransport {
+    fn open(name: &str) -> Option<LgmpMemoryMapping> {
         let cname = CString::new(name).ok()?;
         let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0) };
         if fd < 0 { return None; }
@@ -69,15 +88,73 @@ impl ShmMapping {
             libc::mmap(ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED, fd, 0)
         };
-        if mem == libc::MAP_FAILED { unsafe { libc::close(fd) }; return None; }
         unsafe { libc::close(fd); }
-        Some(ShmMapping { mem: mem as *mut u8, size, fd: -1, name: cname })
+        if mem == libc::MAP_FAILED { return None; }
+        info!(?name, ?size, "POSIX SHM transport opened");
+        Some(LgmpMemoryMapping::new(mem as *mut u8, size))
     }
 }
 
-impl Drop for ShmMapping {
+// ── IVSHMEM transport (real Looking Glass hardware) ───────────────────
+
+struct IvshmemTransport;
+
+impl IvshmemTransport {
+    /// Try to open /dev/kvmfr{N} for N=0..7
+    fn open() -> Option<LgmpMemoryMapping> {
+        for i in 0..8 {
+            let path = PathBuf::from(format!("/dev/kvmfr{}", i));
+            if !path.exists() { continue; }
+            match Self::open_path(&path) {
+                Some(m) => {
+                    info!(device = ?path, size = m.size, "IVSHMEM/KVMFR transport opened");
+                    return Some(m);
+                }
+                None => continue,
+            }
+        }
+        None
+    }
+
+    fn open_path(path: &std::path::Path) -> Option<LgmpMemoryMapping> {
+        use std::fs::File;
+        use std::os::unix::io::AsRawFd;
+
+        let file = File::open(path).ok()?;
+        let size = unsafe { libc::lseek(file.as_raw_fd(), 0, libc::SEEK_END) };
+        if size <= 0 {
+            // kvmfr may not support SEEK_END; try a common size
+            // Real IVSHMEM devices set by QEMU are usually 4MB+64KB or 32MB+64KB
+            for guess in [4227858432, 33619968, 4194304] {
+                let mem = unsafe {
+                    libc::mmap(ptr::null_mut(), guess, libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_SHARED, file.as_raw_fd(), 0)
+                };
+                if mem != libc::MAP_FAILED {
+                    info!(?path, ?guess, "KVMFR device mapped with guessed size");
+                    return Some(LgmpMemoryMapping::new(mem as *mut u8, guess as usize));
+                }
+            }
+            return None;
+        }
+        let size = size as usize;
+        let mem = unsafe {
+            libc::mmap(ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED, file.as_raw_fd(), 0)
+        };
+        if mem == libc::MAP_FAILED { return None; }
+        Some(LgmpMemoryMapping::new(mem as *mut u8, size))
+    }
+}
+
+/// Hold a mapping + free it on drop
+struct MappedRegion {
+    mapping: LgmpMemoryMapping,
+}
+
+impl Drop for MappedRegion {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.mem as *mut libc::c_void, self.size); }
+        unsafe { libc::munmap(self.mapping.mem as *mut libc::c_void, self.mapping.size); }
     }
 }
 
@@ -86,7 +163,7 @@ impl Drop for ShmMapping {
 pub struct KvmfrFrameProducer {
     state: ProducerState,
     frame_count: u64,
-    _mapping: Option<ShmMapping>,
+    _region: Option<MappedRegion>,
 }
 
 enum ProducerState {
@@ -97,18 +174,19 @@ enum ProducerState {
 
 impl KvmfrFrameProducer {
     pub fn new() -> Self {
-        KvmfrFrameProducer { state: ProducerState::Uninitialized, frame_count: 0, _mapping: None }
+        KvmfrFrameProducer { state: ProducerState::Uninitialized, frame_count: 0, _region: None }
     }
 
+    /// Try transports in priority order, then init LGMP on the first that works.
     fn try_lgmp(&mut self, renderer: &mut GlesRenderer) -> Option<FrameResult> {
-        // Try POSIX SHM first (for testing without hardware)
-        let mapping = ShmMapping::open("/looking-glass-ng-test")?;
-        info!(size = mapping.size, "LGMP SHM transport opened");
+        // 1) Try IVSHMEM /dev/kvmfr{N} (real Looking Glass hardware)
+        let mapping = IvshmemTransport::open()
+            // 2) Fall back to POSIX SHM (integration testing)
+            .or_else(|| PosixShmTransport::open("/looking-glass-ng-test"))?;
 
-        let mem = mapping.mem as *mut libc::c_void;
-        let size = mapping.size;
+        let mem = mapping.ptr();
+        let size = mapping.len();
 
-        // Init LGMP client — this validates the LGMP magic
         let mut client: *mut ffi::LGMPClient = ptr::null_mut();
         let s = unsafe { ffi::lgmpClientInit(mem, size, &mut client) };
         if s != 0 || client.is_null() {
@@ -116,76 +194,69 @@ impl KvmfrFrameProducer {
             return None;
         }
 
-        // Session init — retry a few times for host to be ready
         let mut client_id = 0u32;
         let mut remote_ver = 0u32;
         let mut session_ok = false;
         for _ in 0..30 {
             let mut udata_size = 0u32;
             let mut udata: *mut u8 = ptr::null_mut();
-            let s = unsafe {
-                ffi::lgmpClientSessionInit(client, &mut udata_size, &mut udata,
-                    &mut client_id, &mut remote_ver)
-            };
-            if s == 0 { session_ok = true; break; }
+            if unsafe { ffi::lgmpClientSessionInit(client, &mut udata_size, &mut udata,
+                &mut client_id, &mut remote_ver) } == 0
+            { session_ok = true; break; }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         if !session_ok {
-            warn!("lgmpClientSessionInit failed after retries");
+            warn!("lgmpClientSessionInit failed");
             unsafe { ffi::lgmpClientFree(&mut client) };
             return None;
         }
         info!(?client_id, ?remote_ver, "LGMP session OK");
 
-        // Subscribe to frame queue
         let mut queue: *mut ffi::LGMPClientQueue = ptr::null_mut();
-        let s = unsafe { ffi::lgmpClientSubscribe(client, ffi::LGMP_Q_FRAME, &mut queue) };
-        if s != 0 || queue.is_null() {
+        if unsafe { ffi::lgmpClientSubscribe(client, ffi::LGMP_Q_FRAME, &mut queue) } != 0 || queue.is_null() {
             warn!("lgmpClientSubscribe failed");
             unsafe { ffi::lgmpClientFree(&mut client) };
             return None;
         }
         info!("LGMP frame queue subscribed");
 
-        // Try to get a frame immediately
-        unsafe { ffi::lgmpClientAdvanceToLast(queue); }
+        // Keep the mapping alive
+        self._region = Some(MappedRegion { mapping });
 
+        // Try to get a frame
+        unsafe { ffi::lgmpClientAdvanceToLast(queue); }
         let mut msg = ffi::LGMPMessage { udata: 0, size: 0, mem: ptr::null_mut() };
-        let s = unsafe { ffi::lgmpClientProcess(queue, &mut msg) };
-        if s == 0 && !msg.mem.is_null() {
+        let got_frame = unsafe { ffi::lgmpClientProcess(queue, &mut msg) } == 0 && !msg.mem.is_null();
+
+        if got_frame {
             let meta = unsafe { &*(msg.mem as *const [u32; 4]) };
             let width = meta[1];
             let height = meta[2];
             let frame_ptr = msg.udata as *const u8;
             if !frame_ptr.is_null() && width > 0 && height > 0 {
-                let data_size = (width * height * 4) as usize;
-                let pixels = unsafe { std::slice::from_raw_parts(frame_ptr, data_size) };
+                let pixels = unsafe { std::slice::from_raw_parts(frame_ptr, (width * height * 4) as usize) };
                 if let Ok(tex) = renderer.import_memory(pixels, Fourcc::Abgr8888,
                     (width as i32, height as i32).into(), false)
                 {
                     unsafe { ffi::lgmpClientMessageDone(queue); }
-                    info!(?width, ?height, "REAL KVMFR frame acquired via LGMP");
-                    self._mapping = Some(mapping);
+                    info!(?width, ?height, "LGMP frame acquired");
                     self.state = ProducerState::Simulated { texture: tex, width, height };
                     return Some(FrameResult::Updated);
                 }
             }
         }
 
-        // No frame yet, but we have the LGMP connection. Return updated
-        // with a placeholder. Real frames come on subsequent update() calls.
-        self._mapping = Some(mapping);
-        // Generate a simple test pattern
+        // No frame yet: show a checkerboard until one arrives
         let (w, h) = (512u32, 384u32);
         let mut pixels = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             for x in 0..w {
-                let bright = ((x / 64) + (y / 64)) % 2 == 0;
-                if bright { pixels.extend_from_slice(&[200, 60, 240, 255]); }
+                if ((x / 64) + (y / 64)) % 2 == 0 { pixels.extend_from_slice(&[200, 60, 240, 255]); }
                 else { pixels.extend_from_slice(&[15, 8, 20, 255]); }
             }
         }
         let tex = renderer.import_memory(&pixels, Fourcc::Abgr8888, (w as i32, h as i32).into(), false).ok()?;
+        info!("LGMP transport connected, awaiting first frame");
         self.state = ProducerState::Simulated { texture: tex, width: w, height: h };
         Some(FrameResult::Updated)
     }
@@ -194,23 +265,18 @@ impl KvmfrFrameProducer {
 impl FrameProducer for KvmfrFrameProducer {
     fn update(&mut self, renderer: &mut GlesRenderer) -> FrameResult {
         self.frame_count += 1;
-
-        // First call: try LGMP immediately
         if self.frame_count == 1 && matches!(self.state, ProducerState::Uninitialized) {
             match self.try_lgmp(renderer) {
-                Some(result) => return result,
+                Some(r) => return r,
                 None => {
-                    info!("LGMP init failed, using simulated frame source");
+                    info!("LGMP transport unavailable, using simulated frames");
                     return self.fallback_simulated(renderer);
                 }
             }
         }
-
         match &mut self.state {
             ProducerState::Simulated { ref mut texture, .. } => {
-                if self.frame_count % 5 != 0 {
-                    return FrameResult::Unchanged;
-                }
+                if self.frame_count % 5 != 0 { return FrameResult::Unchanged; }
                 let mut pixels = vec![0u8; 256 * 256 * 4];
                 let shift = ((self.frame_count / 5) % 12) as u8;
                 for y in 0..256u32 {
@@ -223,34 +289,22 @@ impl FrameProducer for KvmfrFrameProducer {
                         pixels[i + 3] = 255;
                     }
                 }
-                if let Ok(tex) = renderer.import_memory(&pixels, Fourcc::Abgr8888,
-                    (256, 256).into(), false)
-                {
-                    *texture = tex;
-                    FrameResult::Updated
-                } else {
-                    FrameResult::Error("sim tex import failed".into())
+                match renderer.import_memory(&pixels, Fourcc::Abgr8888, (256, 256).into(), false) {
+                    Ok(tex) => { *texture = tex; FrameResult::Updated }
+                    Err(e) => FrameResult::Error(format!("tex: {:?}", e)),
                 }
             }
-            ProducerState::NoDevice => {
-                FrameResult::Error("KVMFR unavailable".into())
-            }
+            ProducerState::NoDevice => FrameResult::Error("KVMFR unavailable".into()),
             _ => FrameResult::Unchanged,
         }
     }
 
     fn texture(&self) -> &GlesTexture {
-        match &self.state {
-            ProducerState::Simulated { texture, .. } => texture,
-            _ => panic!("texture() without valid state"),
-        }
+        match &self.state { ProducerState::Simulated { texture, .. } => texture, _ => unreachable!() }
     }
 
     fn size(&self) -> (u32, u32) {
-        match &self.state {
-            ProducerState::Simulated { width, height, .. } => (*width, *height),
-            _ => (0, 0),
-        }
+        match &self.state { ProducerState::Simulated { width, height, .. } => (*width, *height), _ => (0, 0) }
     }
 }
 
@@ -259,22 +313,13 @@ impl KvmfrFrameProducer {
         let w = 256u32;
         let h = 256u32;
         let mut pixels = Vec::with_capacity((w * h * 4) as usize);
-        for y in 0..h {
-            for x in 0..w {
-                let bright = ((x / 32) + (y / 32)) % 2 == 0;
-                if bright { pixels.extend_from_slice(&[200, 60, 240, 255]); }
-                else { pixels.extend_from_slice(&[15, 8, 20, 255]); }
-            }
-        }
+        for y in 0..h { for x in 0..w {
+            if ((x / 32) + (y / 32)) % 2 == 0 { pixels.extend_from_slice(&[200, 60, 240, 255]); }
+            else { pixels.extend_from_slice(&[15, 8, 20, 255]); }
+        }}
         match renderer.import_memory(&pixels, Fourcc::Abgr8888, (w as i32, h as i32).into(), false) {
-            Ok(texture) => {
-                self.state = ProducerState::Simulated { texture, width: w, height: h };
-                FrameResult::Updated
-            }
-            Err(e) => {
-                self.state = ProducerState::NoDevice;
-                FrameResult::Error(format!("KVMFR fallback: {:?}", e))
-            }
+            Ok(texture) => { self.state = ProducerState::Simulated { texture, width: w, height: h }; FrameResult::Updated }
+            Err(e) => { self.state = ProducerState::NoDevice; FrameResult::Error(format!("fallback: {:?}", e)) }
         }
     }
 }
