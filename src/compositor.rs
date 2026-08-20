@@ -1,6 +1,7 @@
 //! Wayland protocol integration and central compositor state.
 
 use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::ImportMem;
 use smithay::backend::renderer::ImportMemWl;
 use smithay::backend::renderer::Texture;
 use smithay::backend::SwapBuffersError;
@@ -122,6 +123,7 @@ pub struct LookingGlass {
     pub scene: Scene,
     pub camera: Camera,
     pub spatial_mode: bool,
+    external_added: bool,
 }
 
 impl LookingGlass {
@@ -145,6 +147,7 @@ impl LookingGlass {
             scene: Scene::default(),
             camera: Camera::new(),
             spatial_mode: false,
+            external_added: false,
         }
     }
 
@@ -205,7 +208,7 @@ impl LookingGlass {
                     info.size = Some((tex_size.w, tex_size.h));
 
                     let mut visual = Visual::new(
-                        VisualContent::SurfaceTexture(texture),
+                        VisualContent::WaylandSurface(texture),
                         smithay::utils::Rectangle::new(
                             smithay::utils::Point::new(0, 0),
                             smithay::utils::Size::new(tex_size.w, tex_size.h),
@@ -236,7 +239,68 @@ impl LookingGlass {
         }
     }
 
+    /// Create a visual from external (non-Wayland) pixel data.
+    /// This demonstrates the VisualContent::ExternalTexture abstraction.
+    /// A real external producer (e.g. Looking Glass framebuffer) would
+    /// provide GPU textures through this same path.
+    pub fn add_external_visual(&mut self, pixels: Vec<u8>, width: u32, height: u32) {
+        use smithay::backend::allocator::Fourcc;
+        use smithay::backend::renderer::ImportMem;
+
+        let Some(backend) = self.backend.as_mut() else { return };
+        let renderer = backend.renderer();
+        if let Ok(texture) = renderer.import_memory(
+            &pixels,
+            Fourcc::Abgr8888,
+            (width as i32, height as i32).into(),
+            false,
+        ) {
+            let visual = Visual::new(
+                VisualContent::ExternalTexture(texture),
+                smithay::utils::Rectangle::new(
+                    smithay::utils::Point::new(0, 0),
+                    smithay::utils::Size::new(width as i32, height as i32),
+                ),
+            );
+            info!(visual_id = ?visual.id, width, height, "external visual created");
+            self.scene.add(visual);
+        }
+    }
+
     pub fn render(&mut self) {
+        if !self.external_added {
+            self.external_added = true;
+            // Generate checkerboard pixels in software
+            let w = 256u32;
+            let h = 256u32;
+            let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    let bright = ((x / 32) + (y / 32)) % 2 == 0;
+                    if bright { pixels.extend_from_slice(&[255, 255, 255, 255]); }
+                    else { pixels.extend_from_slice(&[0, 0, 0, 255]); }
+                }
+            }
+            // Import as GPU texture (borrow backend separately)
+            let tex_result = self.backend.as_mut().and_then(|b| {
+                let r = b.renderer();
+                r.import_memory(&pixels, smithay::backend::allocator::Fourcc::Abgr8888,
+                    (w as i32, h as i32).into(), false).ok()
+            });
+            if let Some(texture) = tex_result {
+                let mut visual = Visual::new(
+                    VisualContent::ExternalTexture(texture),
+                    smithay::utils::Rectangle::new(
+                        smithay::utils::Point::new(0, 0),
+                        smithay::utils::Size::new(w as i32, h as i32),
+                    ),
+                );
+                visual.transform.position = cgmath::Vector3::new(0.0, 200.0, 0.0);
+                self.scene.add(visual);
+                info!("external checkerboard visual added at y=200");
+            }
+        }
+
         let Some(backend) = self.backend.as_mut() else {
             return;
         };

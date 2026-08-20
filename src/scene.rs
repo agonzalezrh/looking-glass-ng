@@ -54,7 +54,10 @@ impl Transform3D {
 
 #[derive(Debug, Clone)]
 pub enum VisualContent {
-    SurfaceTexture(GlesTexture),
+    /// Texture originating from a Wayland client wl_buffer
+    WaylandSurface(GlesTexture),
+    /// Texture from an external producer (Looking Glass, synthetic, etc.)
+    ExternalTexture(GlesTexture),
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +80,7 @@ impl Visual {
 
     pub fn texture(&self) -> Option<&GlesTexture> {
         match &self.content {
-            VisualContent::SurfaceTexture(t) => Some(t),
+            VisualContent::WaylandSurface(t) | VisualContent::ExternalTexture(t) => Some(t),
         }
     }
 }
