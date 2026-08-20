@@ -36,7 +36,7 @@ use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::shm::ShmHandler;
 use smithay::wayland::shm::ShmState;
 use crate::input::Camera;
-use crate::producer::FrameProducer;
+use crate::producer::{FrameProducer, FrameResult};
 use crate::scene::{Scene, Visual, VisualContent, VisualId};
 use crate::renderer;
 use tracing::error;
@@ -294,28 +294,55 @@ impl LookingGlass {
     }
 
     pub fn render(&mut self) {
-        // Step 1: Update frame producers using a separate borrow scope
-        let updates: Vec<(VisualId, GlesTexture)> = {
+        // Step 1: Update frame producers
+        let mut removed = Vec::new();
+        let mut updates: Vec<(VisualId, GlesTexture)> = Vec::new();
+        {
             let backend = match self.backend.as_mut() {
                 Some(b) => b,
                 None => return,
             };
             let renderer = backend.renderer();
-            self.producers.iter_mut().filter_map(|(vid, producer)| {
-                if producer.update(renderer) {
-                    Some((*vid, producer.texture().clone()))
-                } else {
-                    None
-                }
-            }).collect()
-        };
-        // Apply texture updates to Visuals
-        for (vid, tex) in updates {
-            if let Some(visual) = self.scene.get_mut(vid) {
-                if let Some(dst) = visual.texture_mut() {
-                    *dst = tex;
+            let mut i = 0;
+            while i < self.producers.len() {
+                let (vid, producer) = &mut self.producers[i];
+                let result = producer.update(renderer);
+                match result {
+                    FrameResult::Updated => {
+                        updates.push((*vid, producer.texture().clone()));
+                        i += 1;
+                    }
+                    FrameResult::Unchanged => {
+                        i += 1;
+                    }
+                    FrameResult::Resized(_w, _h) => {
+                        updates.push((*vid, producer.texture().clone()));
+                        // Visual geometry update happens below
+                        i += 1;
+                    }
+                    FrameResult::Error(msg) => {
+                        warn!(?vid, ?msg, "producer error");
+                        i += 1;
+                    }
+                    FrameResult::Finished => {
+                        info!(?vid, "producer finished, removing");
+                        removed.push(*vid);
+                        self.producers.swap_remove(i);
+                    }
                 }
             }
+        }
+        // Apply texture updates to Visuals
+        for (vid, tex) in &updates {
+            if let Some(visual) = self.scene.get_mut(*vid) {
+                if let Some(dst) = visual.texture_mut() {
+                    *dst = tex.clone();
+                }
+            }
+        }
+        // Remove finished producers' visuals from scene
+        for vid in &removed {
+            self.scene.remove(*vid);
         }
 
         let Some(backend) = self.backend.as_mut() else {

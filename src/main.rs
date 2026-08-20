@@ -10,7 +10,7 @@ mod window;
 use std::sync::Arc;
 
 use compositor::{ClientState, LookingGlass};
-use producer::AnimatedCheckerboard;
+use producer::HostileCheckerboard;
 use smithay::backend::input::{AbsolutePositionEvent, InputEvent, KeyboardKeyEvent};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent};
@@ -49,7 +49,7 @@ fn main() {
     // Register the animated checkerboard frame producer
     // This proves the external frame producer pipeline works with continuous updates.
     // A Looking Glass KVMFR producer would be registered the same way.
-    if let Some(prod) = AnimatedCheckerboard::new(
+    if let Some(prod) = HostileCheckerboard::new(
         state.backend.as_mut().map(|b| b.renderer()).unwrap(),
     ) {
         state.add_producer(Box::new(prod));

@@ -3,46 +3,68 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::ImportMem;
 
+/// Result of a frame update.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameResult {
+    /// A new frame was imported and the texture changed.
+    Updated,
+    /// No new frame available; use existing texture.
+    Unchanged,
+    /// The producer changed size; new texture has different dimensions.
+    Resized(u32, u32),
+    /// The producer encountered a non-fatal error.
+    Error(String),
+    /// The producer has shut down and should be removed.
+    Finished,
+}
+
 /// A producer of GPU textures for the scene.
 ///
-/// Each frame, the compositor calls `update()` on every registered producer.
-/// If the producer has new pixel data, it imports it into the renderer and
-/// replaces its internal texture. The compositor then picks up the new texture
-/// via `texture()` and updates the corresponding Visual.
+/// Each frame the compositor calls `update()` on every registered producer.
+/// The producer imports new pixel data into the renderer and returns
+/// a FrameResult indicating what changed. The compositor then updates
+/// the corresponding Visual's texture if needed.
 ///
-/// This abstraction is the bridge between external frame sources (Looking Glass
-/// KVMFR, DMA-BUF, video decodes, etc.) and the existing Scene/Visual pipeline.
+/// Producers manage their own GPU resource lifecycle — old textures are
+/// dropped when new ones are imported, and the compositor never holds
+/// stale references.
 pub trait FrameProducer {
-    /// Update the texture. Returns true if the frame changed.
-    fn update(&mut self, renderer: &mut GlesRenderer) -> bool;
-    /// Get the current texture
+    /// Attempt to produce a new frame. Returns a FrameResult.
+    fn update(&mut self, renderer: &mut GlesRenderer) -> FrameResult;
+    /// Get the current texture (valid after the first successful update).
     fn texture(&self) -> &GlesTexture;
-    /// Get the dimensions of the produced frames
+    /// Get the current dimensions.
     fn size(&self) -> (u32, u32);
 }
 
-/// An animated checkerboard that continuously cycles colors.
+/// An animated checkerboard that deliberately tests edge cases.
 ///
-/// This demonstrates a producer that updates its texture every frame.
-/// A real Looking Glass KVMFR producer would replace this.
-pub struct AnimatedCheckerboard {
+/// - Occasionally drops frames (returns Unchanged)
+/// - Occasionally resizes
+/// - Occasionally "fails" (returns Error)
+/// - Eventually finishes (returns Finished)
+///
+/// This is a hostile test for the FrameProducer lifecycle.
+pub struct HostileCheckerboard {
     texture: GlesTexture,
     width: u32,
     height: u32,
     frame_count: u64,
+    max_frames: u64,
 }
 
-impl AnimatedCheckerboard {
+impl HostileCheckerboard {
     pub fn new(renderer: &mut GlesRenderer) -> Option<Self> {
         let w = 256u32;
         let h = 256u32;
         let pixels = Self::generate(w, h, 0);
         let tex = renderer.import_memory(&pixels, Fourcc::Abgr8888, (w as i32, h as i32).into(), false).ok()?;
-        Some(AnimatedCheckerboard {
+        Some(HostileCheckerboard {
             texture: tex,
             width: w,
             height: h,
             frame_count: 0,
+            max_frames: 300,
         })
     }
 
@@ -66,24 +88,52 @@ impl AnimatedCheckerboard {
     }
 }
 
-impl FrameProducer for AnimatedCheckerboard {
-    fn update(&mut self, renderer: &mut GlesRenderer) -> bool {
+impl FrameProducer for HostileCheckerboard {
+    fn update(&mut self, renderer: &mut GlesRenderer) -> FrameResult {
         self.frame_count += 1;
-        // Only regenerate every 3 frames to show animation
+
+        // After max_frames, shut down
+        if self.frame_count > self.max_frames {
+            return FrameResult::Finished;
+        }
+
+        // Every 20th frame: simulate an error
+        if self.frame_count % 20 == 0 {
+            return FrameResult::Error("simulated glitch".into());
+        }
+
+        // Every 15th frame: drop (no new frame)
+        if self.frame_count % 15 == 0 {
+            return FrameResult::Unchanged;
+        }
+
+        // Every 30th frame: resize (alternate between two sizes)
+        if self.frame_count % 30 == 0 {
+            let new_w = if self.width == 256 { 192 } else { 256 };
+            let new_h = if self.height == 256 { 192 } else { 256 };
+            self.width = new_w;
+            self.height = new_h;
+            let pixels = Self::generate(new_w, new_h, self.frame_count / 3);
+            if let Ok(tex) = renderer.import_memory(
+                &pixels, Fourcc::Abgr8888, (new_w as i32, new_h as i32).into(), false,
+            ) {
+                self.texture = tex;
+                return FrameResult::Resized(new_w, new_h);
+            }
+        }
+
+        // Normal update every 3 frames
         if self.frame_count % 3 != 0 {
-            return false;
+            return FrameResult::Unchanged;
         }
         let pixels = Self::generate(self.width, self.height, self.frame_count / 3);
         if let Ok(tex) = renderer.import_memory(
-            &pixels,
-            Fourcc::Abgr8888,
-            (self.width as i32, self.height as i32).into(),
-            false,
+            &pixels, Fourcc::Abgr8888, (self.width as i32, self.height as i32).into(), false,
         ) {
             self.texture = tex;
-            true
+            FrameResult::Updated
         } else {
-            false
+            FrameResult::Error("GPU import failed".into())
         }
     }
 
