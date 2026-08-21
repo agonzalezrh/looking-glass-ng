@@ -68,6 +68,7 @@ pub struct Visual {
     pub geometry: Rectangle<i32, smithay::utils::Logical>,
     pub transform: Transform3D,
     pub selected: bool,
+    pub focused: bool,
 }
 
 impl Visual {
@@ -78,6 +79,7 @@ impl Visual {
             geometry,
             transform: Transform3D::identity(),
             selected: false,
+            focused: false,
         }
     }
 
@@ -98,6 +100,8 @@ impl Visual {
 pub struct Scene {
     pub visuals: Vec<Visual>,
     pub selected_id: Option<VisualId>,
+    pub focused_id: Option<VisualId>,
+    pub hovered_id: Option<VisualId>,
 }
 
 impl Scene {
@@ -109,6 +113,12 @@ impl Scene {
         self.visuals.retain(|v| v.id != id);
         if self.selected_id == Some(id) {
             self.selected_id = None;
+        }
+        if self.focused_id == Some(id) {
+            self.focused_id = None;
+        }
+        if self.hovered_id == Some(id) {
+            self.hovered_id = None;
         }
     }
 
@@ -134,6 +144,26 @@ impl Scene {
         if let Some(new) = id {
             if let Some(v) = self.get_mut(new) {
                 v.selected = true;
+            }
+        }
+    }
+
+    /// Set the focused visual. Unfocuses the previous one.
+    /// Focus is independent of selection — a visual can be focused
+    /// for keyboard input while another is selected for manipulation.
+    pub fn focus(&mut self, id: Option<VisualId>) {
+        if self.focused_id == id {
+            return;
+        }
+        if let Some(old) = self.focused_id {
+            if let Some(v) = self.get_mut(old) {
+                v.focused = false;
+            }
+        }
+        self.focused_id = id;
+        if let Some(new) = id {
+            if let Some(v) = self.get_mut(new) {
+                v.focused = true;
             }
         }
     }
@@ -353,6 +383,28 @@ mod tests {
         // (100-50, 50-25) = (50, 25) in camera-relative. NDC center should hit.
         let r = pick_visual_items(&(proj * view), 0.0, 0.0, &items);
         assert!(r.is_some(), "should hit after camera move");
+    }
+
+    #[test]
+    fn focus_independent_of_selection() {
+        let mut scene = Scene::default();
+        // Can't easily construct Visuals without GlesTexture in scene tests.
+        // Use pick_visual_items for the picking math.
+        // The focus/select API methods don't need Visuals — they just store IDs.
+        scene.focus(Some(VisualId(1)));
+        assert_eq!(scene.focused_id, Some(VisualId(1)));
+        scene.select(Some(VisualId(2)));
+        assert_eq!(scene.selected_id, Some(VisualId(2)));
+        // Focus untouched
+        assert_eq!(scene.focused_id, Some(VisualId(1)));
+    }
+
+    #[test]
+    fn focus_clear_on_none() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(1)));
+        scene.focus(None);
+        assert_eq!(scene.focused_id, None);
     }
 }
 

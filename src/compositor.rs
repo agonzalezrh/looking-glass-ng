@@ -40,7 +40,7 @@ use std::collections::HashMap;
 use cgmath::Matrix4;
 
 use crate::input::Camera;
-use crate::input_router::{self, InputSink, PointerEventKind};
+use crate::input_router::{self, InputSink, KeyboardEvent, PointerEventKind};
 use crate::interaction::InteractionController;
 use crate::perf::PerfStats;
 use crate::producer::{FrameProducer, FrameResult};
@@ -473,14 +473,21 @@ impl LookingGlass {
     }
 
     /// Route a pointer event to the selected visual's InputSink.
+    /// Focus follows click: sets focused visual to the selected one.
     fn route_to_content(&mut self, kind: PointerEventKind, x: f64, y: f64) {
         let Some(vid) = self.scene.selected_id else { return };
+
+        // Focus follows click
+        if kind == PointerEventKind::Down {
+            self.scene.focus(Some(vid));
+            info!(?vid, "focus set");
+        }
+
         let (w, h) = self.window_size;
         let ndc_x = (x as f32 / w) * 2.0 - 1.0;
         let ndc_y = -((y as f32 / h) * 2.0 - 1.0);
         let pv = self.proj_view();
 
-        // Extract transform and size before borrowing input_sinks
         let transform_and_size = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| {
             (v.transform.clone(), v.geometry.size.w as f32, v.geometry.size.h as f32)
         });
@@ -492,6 +499,17 @@ impl LookingGlass {
         ) {
             sink.handle_pointer(kind, u, v);
         }
+    }
+
+    /// Route a keyboard event to the focused visual's InputSink.
+    fn route_keyboard(&mut self, key: u32, pressed: bool) {
+        let Some(vid) = self.scene.focused_id else { return };
+        let Some(sink) = self.input_sinks.get_mut(&vid) else { return };
+        let hid = input_router::linux_to_hid(key);
+        if hid == 0 {
+            return; // unmapped key
+        }
+        sink.handle_keyboard(KeyboardEvent { key: hid, pressed });
     }
 
     /// Public entry point for a pointer button press.
@@ -525,6 +543,20 @@ impl LookingGlass {
         self.last_mouse = (x, y);
         self.interaction.window_size = self.window_size;
         self.interaction.handle_pointer_move(x, y, &mut self.scene, &self.camera, self.spatial_mode);
+    }
+
+    /// Public entry point for keyboard events.
+    /// Routes to the focused visual's InputSink.
+    /// Tab key (23) is always consumed by the compositor for spatial mode toggle.
+    pub fn handle_key(&mut self, linux_key: u32, pressed: bool) {
+        // Tab is always compositor-only
+        if linux_key == 23 && pressed {
+            self.spatial_mode = !self.spatial_mode;
+            tracing::info!(spatial_mode = self.spatial_mode, "mode toggled");
+            return;
+        }
+        // Route keyboard to focused visual
+        self.route_keyboard(linux_key, pressed);
     }
 }
 

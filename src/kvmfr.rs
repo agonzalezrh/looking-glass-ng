@@ -206,10 +206,6 @@ impl InputSink for KvmfrInputSink {
     fn handle_pointer(&mut self, kind: PointerEventKind, u: f64, v: f64) {
         let msg = match kind {
             PointerEventKind::Down | PointerEventKind::Up | PointerEventKind::Motion => {
-                // u,v are [0,1] normalized. Convert to fixed-point or use as-is.
-                // The guest framebuffer size is negotiated through LGMP.
-                // For now, send normalized coordinates as u32.
-                // type 0 = move, 1 = button
                 let msg_type = match kind {
                     PointerEventKind::Motion => 0u32,
                     PointerEventKind::Down => 1u32,
@@ -224,9 +220,13 @@ impl InputSink for KvmfrInputSink {
                 };
                 ffi::CursorChannelMessage { msg_type, x, y, buttons }
             }
-            PointerEventKind::Scroll(_, _) => return, // not yet handled
+            PointerEventKind::Scroll(_, _) => return,
         };
         self.send_cursor_msg(&msg);
+    }
+
+    fn handle_keyboard(&mut self, event: crate::input_router::KeyboardEvent) {
+        info!(key = event.key, pressed = event.pressed, "KVMFR keyboard (LGMP stream API TODO)");
     }
 }
 
@@ -398,12 +398,14 @@ impl FrameProducer for KvmfrFrameProducer {
         if let Some(q) = self.cursor_queue {
             Some(Box::new(KvmfrInputSink::new(q)) as Box<dyn InputSink>)
         } else {
-            // In simulated mode (no LGMP), provide a no-op sink for testing
             #[derive(Debug)]
             struct LogInputSink;
             impl InputSink for LogInputSink {
                 fn handle_pointer(&mut self, kind: PointerEventKind, u: f64, v: f64) {
                     info!(?kind, u, v, "kvmfr input (simulated)");
+                }
+                fn handle_keyboard(&mut self, event: crate::input_router::KeyboardEvent) {
+                    info!(key = event.key, pressed = event.pressed, "kvmfr keyboard (simulated)");
                 }
             }
             Some(Box::new(LogInputSink))
