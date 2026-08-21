@@ -167,79 +167,87 @@ impl LookingGlass {
     }
 
     fn handle_commit(&mut self, surface: &WlSurface) {
-        let idx = self
-            .toplevels
-            .iter()
+        // Extract visual_id BEFORE borrowing self mutably
+        let existing_vid = self.toplevels.iter()
+            .find(|t| t.toplevel.wl_surface() == surface)
+            .and_then(|t| t.visual_id);
+        let idx = self.toplevels.iter()
             .position(|t| t.toplevel.wl_surface() == surface);
-        let Some(idx) = idx else {
-            return;
+        let Some(idx) = idx else { return };
+
+        // On first commit, compute position data before other borrows
+        let first_commit = self.toplevels[idx].lifecycle != SurfaceLifecycle::Mapped;
+        let pos_data = if first_commit {
+            let z_off = [-200.0, 0.0, 200.0];
+            let y_ang = [5.0, 0.0, -5.0];
+            let n = self.toplevels.len();
+            let z = if idx < z_off.len() { z_off[idx] } else { idx as f32 * 50.0 };
+            let ay = if idx < y_ang.len() { y_ang[idx] } else { 0.0 };
+            let x = idx as f32 * 20.0 - (n as f32 - 1.0) * 10.0;
+            Some((x, z, ay))
+        } else {
+            None
         };
-        if self.toplevels[idx].lifecycle != SurfaceLifecycle::Configured {
-            return;
-        }
-        let wl_buffer = with_states(surface, |states| {
+
+        // Extract buffer + damage
+        let (wl_buffer, damage): (Option<_>, Vec<_>) = with_states(surface, |states| {
             let mut cached = states.cached_state.get::<SurfaceAttributes>();
             let attrs = cached.current();
-            match &attrs.buffer {
-                Some(BufferAssignment::NewBuffer(buf)) => Some(buf.clone()),
+            let buf = match &attrs.buffer {
+                Some(BufferAssignment::NewBuffer(b)) => Some(b.clone()),
                 _ => None,
-            }
+            };
+            let dmg = attrs.damage.iter().filter_map(|d| match d {
+                smithay::wayland::compositor::Damage::Buffer(r) => Some(*r),
+                smithay::wayland::compositor::Damage::Surface(r) => {
+                    let bs = attrs.buffer_scale.max(1);
+                    Some(smithay::utils::Rectangle::new(
+                        smithay::utils::Point::new(r.loc.x * bs, r.loc.y * bs),
+                        smithay::utils::Size::new(r.size.w * bs, r.size.h * bs),
+                    ))
+                }
+            }).collect();
+            (buf, dmg)
         });
-        let Some(wl_buffer) = wl_buffer else {
-            return;
-        };
-        // All windows at same X=0 to force full overlap.
-        // Only Z depth separates them: Z=-200 (behind), Z=0 (middle), Z=200 (front).
-        // Window in front (Z=200) should fully occlude the others where they overlap.
-        let z_offsets = [-200.0, 0.0, 200.0];
-        let y_angles = [5.0, 0.0, -5.0];
-        let window_count = self.toplevels.len();
-        let z = if idx < z_offsets.len() { z_offsets[idx] } else { idx as f32 * 50.0 };
-        let angle_y = if idx < y_angles.len() { y_angles[idx] } else { 0.0 };
-        let spread = (window_count as f32 - 1.0) * 10.0;
-        let x = idx as f32 * 20.0 - spread;
+        let Some(wl_buffer) = wl_buffer else { return };
 
-        // Import the buffer using the backend's renderer
         if let Some(backend) = self.backend.as_mut() {
             let renderer = backend.renderer();
             let result = with_states(surface, |states| {
-                renderer.import_shm_buffer(&wl_buffer, Some(states), &[])
+                renderer.import_shm_buffer(&wl_buffer, Some(states), &damage)
             });
             match result {
                 Ok(texture) => {
-                    let info = &mut self.toplevels[idx];
-                    info.lifecycle = SurfaceLifecycle::Mapped;
-                    let tex_size = texture.size();
-                    info.size = Some((tex_size.w, tex_size.h));
+                    if first_commit {
+                        let (x, z, angle_y) = pos_data.unwrap();
+                        let tex_size = texture.size();
+                        self.toplevels[idx].lifecycle = SurfaceLifecycle::Mapped;
+                        self.toplevels[idx].size = Some((tex_size.w, tex_size.h));
 
-                    let mut visual = Visual::new(
-                        VisualContent::WaylandSurface(texture),
-                        smithay::utils::Rectangle::new(
-                            smithay::utils::Point::new(0, 0),
-                            smithay::utils::Size::new(tex_size.w, tex_size.h),
-                        ),
-                    );
-                    use cgmath::Deg;
-                    use cgmath::Rotation3;
-                    visual.transform.position = cgmath::Vector3::new(x, 0.0, z);
-                    visual.transform.rotation = cgmath::Quaternion::from_angle_y(Deg(angle_y));
-                    let visual_id = visual.id;
-                    info.visual_id = Some(visual_id);
-                    self.scene.add(visual);
-                    info!(
-                        app_id = %info.app_id,
-                        title = %info.title,
-                        size = ?info.size,
-                        visual_id = ?visual_id,
-                        pos_x = x,
-                        pos_z = z,
-                        angle_y = angle_y,
-                        "surface mapped"
-                    );
+                        let mut visual = Visual::new(
+                            VisualContent::WaylandSurface(texture),
+                            smithay::utils::Rectangle::new(
+                                smithay::utils::Point::new(0, 0),
+                                smithay::utils::Size::new(tex_size.w, tex_size.h),
+                            ),
+                        );
+                        use cgmath::Deg;
+                        use cgmath::Rotation3;
+                        visual.transform.position = cgmath::Vector3::new(x, 0.0, z);
+                        visual.transform.rotation = cgmath::Quaternion::from_angle_y(Deg(angle_y));
+                        let visual_id = visual.id;
+                        self.toplevels[idx].visual_id = Some(visual_id);
+                        self.scene.add(visual);
+                        info!(?visual_id, app_id = %self.toplevels[idx].app_id, "surface mapped");
+                    } else if let Some(vid) = existing_vid {
+                        if let Some(visual) = self.scene.get_mut(vid) {
+                            if let Some(dst) = visual.texture_mut() {
+                                *dst = texture;
+                            }
+                        }
+                    }
                 }
-                Err(e) => {
-                    warn!(?e, "failed to import SHM buffer");
-                }
+                Err(e) => warn!(?e, "SHM import failed"),
             }
         }
     }
