@@ -138,6 +138,9 @@ pub struct LookingGlass {
     pub perf: PerfStats,
     pub window_size: (f32, f32),
     pub last_mouse: (f64, f64),
+    pub last_dx: f64,
+    pub last_dy: f64,
+    pub nav_button: u32,
     pub interaction: InteractionController,
     input_sinks: HashMap<VisualId, Box<dyn InputSink>>,
 }
@@ -168,6 +171,9 @@ impl LookingGlass {
             perf: PerfStats::new(),
             window_size: (1280.0, 720.0),
             last_mouse: (0.0, 0.0),
+            last_dx: 0.0,
+            last_dy: 0.0,
+            nav_button: 0,
             interaction: InteractionController::new(),
             input_sinks: HashMap::new(),
         }
@@ -565,36 +571,113 @@ impl LookingGlass {
 
     /// Public entry point for pointer motion.
     pub fn handle_pointer_move(&mut self, x: f64, y: f64) {
+        let dx = x - self.last_mouse.0;
+        let dy = y - self.last_mouse.1;
         self.last_mouse = (x, y);
+        // Navigation buttons (right=mouse 3, middle=mouse 2)
+        if self.nav_button == 3 {
+            self.handle_orbit(dx, dy);
+            return;
+        }
+        if self.nav_button == 2 {
+            self.handle_pan(dx, dy);
+            return;
+        }
         self.interaction.window_size = self.window_size;
         self.interaction.handle_pointer_move(x, y, &mut self.scene, &self.camera, self.spatial_mode);
     }
 
     /// Center the camera on the currently selected visual.
-    /// Returns true if a visual was framed.
     pub fn frame_selected(&mut self) -> bool {
         let Some(vid) = self.scene.selected_id else { return false };
-        let (w, h) = self.window_size;
-        if let Some(pos) = layout::frame_visual(vid, &self.scene, w, h) {
-            self.camera.position = cgmath::Point3::new(pos.x, pos.y, pos.z);
-            info!(?vid, ?pos, "camera framed on visual");
-            true
-        } else {
-            false
+        let result = self.camera.frame_visual(vid, &self.scene);
+        if result {
+            info!(?vid, "camera framed on selected");
         }
+        result
+    }
+
+    /// Frame all visuals in view.
+    pub fn frame_all(&mut self) -> bool {
+        let result = self.camera.frame_all(&self.scene);
+        if result {
+            info!("camera framed all visuals");
+        }
+        result
+    }
+
+    /// Orbit camera (right-drag).
+    pub fn handle_orbit(&mut self, dx: f64, dy: f64) {
+        self.camera.handle_orbit(dx, dy);
+    }
+
+    /// Pan camera (middle-drag).
+    pub fn handle_pan(&mut self, dx: f64, dy: f64) {
+        self.camera.handle_pan(dx, dy, 0.05);
+    }
+
+    /// Zoom camera (scroll).
+    pub fn handle_zoom(&mut self, delta: f64) {
+        self.camera.handle_zoom(delta);
+    }
+
+    /// Save camera bookmark.
+    pub fn save_bookmark(&mut self, slot: usize) {
+        self.camera.save_bookmark(slot);
+        info!(slot, "camera bookmark saved");
+    }
+
+    /// Restore camera bookmark.
+    pub fn restore_bookmark(&mut self, slot: usize) -> bool {
+        let result = self.camera.restore_bookmark(slot);
+        if result {
+            info!(slot, "camera bookmark restored");
+        }
+        result
     }
 
     /// Public entry point for keyboard events.
     /// Routes to the focused visual's InputSink.
     /// Tab key (23) is always consumed by the compositor for spatial mode toggle.
     pub fn handle_key(&mut self, linux_key: u32, pressed: bool) {
-        // Tab is always compositor-only
-        if linux_key == 23 && pressed {
-            self.spatial_mode = !self.spatial_mode;
-            tracing::info!(spatial_mode = self.spatial_mode, "mode toggled");
-            return;
+        // Composite press events only for shortcuts, but always route all events
+        if pressed {
+            // Tab — spatial mode toggle
+            if linux_key == 23 {
+                self.spatial_mode = !self.spatial_mode;
+                tracing::info!(spatial_mode = self.spatial_mode, "mode toggled");
+                return;
+            }
+            // F — frame selected visual
+            if linux_key == 33 {
+                self.frame_selected();
+                return;
+            }
+            // Home — frame all visuals
+            if linux_key == 102 {
+                self.frame_all();
+                return;
+            }
+            // 1-9 — save bookmark; 0 — save slot 9
+            if linux_key >= 2 && linux_key <= 10 {
+                let slot = (linux_key - 2) as usize;
+                if self.scene.selected_id.is_some() {
+                    self.save_bookmark(slot);
+                } else {
+                    self.restore_bookmark(slot);
+                }
+                return;
+            }
+            if linux_key == 11 {
+                if self.scene.selected_id.is_some() {
+                    self.save_bookmark(9);
+                } else {
+                    self.restore_bookmark(9);
+                }
+                return;
+            }
         }
-        // Route keyboard to focused visual
+        // Route ALL keyboard events (down AND up) to focused visual
         self.route_keyboard(linux_key, pressed);
     }
 }

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use compositor::{ClientState, LookingGlass};
 use producer::{HostileCheckerboard, StaticColor};
-use smithay::backend::input::{AbsolutePositionEvent, InputEvent, KeyboardKeyEvent, PointerButtonEvent};
+use smithay::backend::input::{AbsolutePositionEvent, Axis, InputEvent, KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::reexports::calloop::generic::Generic;
@@ -147,15 +147,46 @@ fn main() {
                     InputEvent::PointerMotionAbsolute { event } => {
                         let x = event.x();
                         let y = event.y();
+                        // During right/middle dray, pan/orbit instead of moving content
+                        // (button state tracked via has_active_drag flag)
                         state.handle_pointer_move(x, y);
                     }
                     InputEvent::PointerButton { event } => {
-                        if event.state() == smithay::backend::input::ButtonState::Pressed {
-                            let (mx, my) = state.last_mouse;
-                            state.handle_pointer_down(mx, my, false, false, false);
+                        let pressed = event.state() == smithay::backend::input::ButtonState::Pressed;
+                        let (mx, my) = state.last_mouse;
+                        // Encode button as u32: 1=Left, 2=Middle, 3=Right
+                        let btn_code = match event.button() {
+                            Some(MouseButton::Left) => 1u32,
+                            Some(MouseButton::Middle) => 2u32,
+                            Some(MouseButton::Right) => 3u32,
+                            _ => 0u32,
+                        };
+                        if pressed {
+                            state.nav_button = btn_code;
                         } else {
-                            let (mx, my) = state.last_mouse;
-                            state.handle_pointer_up(mx, my);
+                            state.nav_button = 0;
+                        }
+                        match btn_code {
+                            1 => {
+                                if pressed {
+                                    state.handle_pointer_down(mx, my, false, false, false);
+                                } else {
+                                    state.handle_pointer_up(mx, my);
+                                }
+                            }
+                            2 | 3 => {
+                                // Middle (pan) and Right (orbit): handled in pointer_move
+                            }
+                            _ => {}
+                        }
+                    }
+                    InputEvent::PointerAxis { event } => {
+                        let v = event.amount(Axis::Vertical).unwrap_or(0.0);
+                        let h = event.amount(Axis::Horizontal).unwrap_or(0.0);
+                        if v.abs() > h.abs() {
+                            state.handle_zoom(v);
+                        } else {
+                            state.handle_zoom(h);
                         }
                     }
                     _ => {}
