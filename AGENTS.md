@@ -2,13 +2,70 @@
 
 ## 1. Project identity
 
-You are contributing to Looking Glass NG, a modern Linux Wayland compositor/window manager inspired by Sun Microsystems' Project Looking Glass.
+**Looking Glass NG is a modern 3D Wayland compositor/window manager inspired by the Sun Looking Glass 3D desktop.**
 
-The goal is NOT to create a compositor with a few 3D effects.
+The primary goal is to create a **spatial desktop for normal Wayland applications**.
 
-The goal is to create a spatial desktop in which normal Wayland application surfaces are represented as 2D surfaces embedded in a 3D scene.
+Normal Wayland application surfaces (XDG toplevels) are first-class 3D visual objects in the scene.
 
-Applications must remain unaware that the desktop is spatial.
+The user should be able to run normal Linux applications — terminals, browsers, editors, GTK/Qt applications — and arrange their windows in genuine 3D space.
+
+Applications remain unaware that the desktop is spatial.
+
+The core product is:
+
+```text
+Wayland clients
+       ↓
+XDG toplevel surfaces
+       ↓
+Visual objects
+       ↓
+3D Scene
+       ↓
+Camera / Layout / Interaction
+       ↓
+GLES Renderer
+```
+
+The MVP must be demonstrable using ordinary Wayland applications alone. No VMs required.
+
+### KVMFR/Looking Glass KVM
+
+The project also supports loading external frame buffers through the `FrameProducer` abstraction. KVMFR framebuffers from Looking Glass KVM are one such optional provider.
+
+**KVMFR is an optional `FrameProducer`, not the purpose of the compositor.**
+
+The architecture must remain provider-agnostic:
+
+```text
+Looking Glass NG
+       │
+   ┌───┴───┐
+   │       │
+Wayland  External (KVMFR, etc.)
+   │       │
+   └───┬───┘
+       ▼
+     Visual
+       │
+       ▼
+     Scene
+       │
+       ▼
+    Renderer
+```
+
+Provider-specific code belongs ONLY behind the `FrameProducer`, `InputSink`, and `ProviderCapabilities` interfaces. The following must NEVER contain provider-specific logic:
+
+- `Scene`
+- `Visual`
+- `Renderer`
+- `Camera`
+- `InteractionController`
+- `InputRouter`
+- `Layout`
+- `Workspace`
 
 The compositor owns:
 
@@ -21,7 +78,6 @@ The compositor owns:
 - spatial navigation
 - rendering
 - decorations
-- shadows
 - spatial interaction
 
 The application owns:

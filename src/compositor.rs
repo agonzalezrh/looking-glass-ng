@@ -10,11 +10,12 @@ use smithay::delegate_compositor;
 use smithay::delegate_seat;
 use smithay::delegate_shm;
 use smithay::delegate_xdg_shell;
-use smithay::input::keyboard::LedState;
-use smithay::input::pointer::CursorImageStatus;
+use smithay::input::keyboard::{KeyboardHandle, LedState};
+use smithay::input::pointer::{ButtonEvent, CursorImageStatus, MotionEvent, PointerHandle};
 use smithay::input::Seat;
 use smithay::input::SeatHandler;
 use smithay::input::SeatState;
+use smithay::utils::Logical;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Client;
@@ -146,6 +147,10 @@ pub struct LookingGlass {
     pub nav_button: u32,
     pub interaction: InteractionController,
     input_sinks: HashMap<VisualId, Box<dyn InputSink>>,
+    /// Track Wayland WlSurface per VisualId for direct seat input.
+    pub wayland_surfaces: HashMap<VisualId, WlSurface>,
+    pub pointer_handle: Option<PointerHandle<Self>>,
+    pub keyboard_handle: Option<KeyboardHandle<Self>>,
 }
 
 /// Result of routing a pointer event to the selected visual's content.
@@ -159,7 +164,14 @@ impl LookingGlass {
         let compositor_state = CompositorState::new::<Self>(display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(display_handle);
         let shm_state = ShmState::new::<Self>(display_handle, vec![]);
-        let seat_state = SeatState::new();
+        let mut seat_state = SeatState::new();
+
+        // Create a seat and pointer/keyboard handles for Wayland input routing
+        let mut seat_actual = seat_state.new_seat("default");
+        let pointer_handle = Some(seat_actual.add_pointer());
+        // Keyboard handle may fail if no keymap is available; that's OK
+        let _keyboard_result = seat_actual.add_keyboard(smithay::input::keyboard::XkbConfig::default(), 0, 0);
+        let keyboard_handle = seat_actual.get_keyboard();
 
         LookingGlass {
             display_handle: display_handle.clone(),
@@ -184,6 +196,9 @@ impl LookingGlass {
             nav_button: 0,
             interaction: InteractionController::new(),
             input_sinks: HashMap::new(),
+            wayland_surfaces: HashMap::new(),
+            pointer_handle,
+            keyboard_handle,
         }
     }
 
@@ -268,6 +283,7 @@ impl LookingGlass {
                         visual.transform.rotation = cgmath::Quaternion::from_angle_y(Deg(angle_y));
                         let visual_id = visual.id;
                         self.toplevels[idx].visual_id = Some(visual_id);
+                        self.wayland_surfaces.insert(visual_id, surface.clone());
                         self.scene.add(visual);
                         info!(?visual_id, app_id = %self.toplevels[idx].app_id, "surface mapped");
                     } else if let Some(vid) = existing_vid {
@@ -534,9 +550,53 @@ impl LookingGlass {
             if v < title_frac {
                 return ContentRouting::TitleBarHit;
             }
+            let content_u = u.clamp(0.0, 1.0);
             let content_v = (v - title_frac) / (1.0 - title_frac);
+            let content_v = content_v.clamp(0.0, 1.0);
+
+            // Check if this is a Wayland surface — if so, emit Smithay seat events
+            // Clone handles first to avoid borrow conflicts with ph.motion(self,...)
+            let wl_surface = self.wayland_surfaces.get(&vid).cloned();
+            let pointer_handle = self.pointer_handle.clone();
+            let geom_w = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| v.geometry.size.w as f64);
+
+            if let (Some(wl_surface), Some(ph)) = (wl_surface, pointer_handle) {
+                if let Some(gw) = geom_w {
+                    let geom_h = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| v.geometry.size.h as f64).unwrap_or(1.0);
+                    let px = content_u * gw;
+                    let py = content_v * geom_h;
+                    let pos: smithay::utils::Point<f64, smithay::utils::Logical> = (px, py).into();
+                    let btn_ev = ButtonEvent {
+                        serial: smithay::utils::Serial::from(0),
+                        time: 0,
+                        button: 0x110,
+                        state: match kind {
+                            PointerEventKind::Down => smithay::backend::input::ButtonState::Pressed,
+                            PointerEventKind::Up => smithay::backend::input::ButtonState::Released,
+                            _ => smithay::backend::input::ButtonState::Pressed,
+                        },
+                    };
+                    let mot_ev = MotionEvent {
+                        location: pos,
+                        serial: smithay::utils::Serial::from(0),
+                        time: 0,
+                    };
+                    match kind {
+                        PointerEventKind::Motion => {
+                            ph.motion(self, Some((wl_surface.clone(), pos)), &mot_ev);
+                        }
+                        PointerEventKind::Down | PointerEventKind::Up => {
+                            ph.motion(self, Some((wl_surface.clone(), pos)), &mot_ev);
+                            ph.button(self, &btn_ev);
+                        }
+                        PointerEventKind::Scroll(_, _) => {}
+                    }
+                    return ContentRouting::Routed;
+                }
+            }
+
             let Some(sink) = self.input_sinks.get_mut(&vid) else { return ContentRouting::NoTarget };
-            sink.handle_pointer(kind, u.clamp(0.0, 1.0), content_v.clamp(0.0, 1.0));
+            sink.handle_pointer(kind, content_u, content_v);
             return ContentRouting::Routed;
         }
         ContentRouting::NoTarget
@@ -843,6 +903,7 @@ impl XdgShellHandler for LookingGlass {
             let info = self.toplevels.remove(idx);
             if let Some(vid) = info.visual_id {
                 self.scene.remove(vid);
+                self.wayland_surfaces.remove(&vid);
             }
             info!(
                 app_id = %info.app_id,
