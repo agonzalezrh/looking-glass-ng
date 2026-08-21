@@ -88,6 +88,39 @@ impl HostileCheckerboard {
     }
 }
 
+/// A static colored quad that never updates. Ideal for scaling benchmarks.
+pub struct StaticColor {
+    texture: GlesTexture,
+    width: u32,
+    height: u32,
+}
+
+impl StaticColor {
+    pub fn new(renderer: &mut GlesRenderer, r: u8, g: u8, b: u8) -> Option<Self> {
+        let w = 128u32;
+        let h = 128u32;
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for _y in 0..h {
+            for _x in 0..w {
+                pixels.extend_from_slice(&[b, g, r, 255]);
+            }
+        }
+        let tex = renderer.import_memory(
+            &pixels, smithay::backend::allocator::Fourcc::Abgr8888,
+            (w as i32, h as i32).into(), false,
+        ).ok()?;
+        Some(StaticColor { texture: tex, width: w, height: h })
+    }
+}
+
+impl FrameProducer for StaticColor {
+    fn update(&mut self, _renderer: &mut GlesRenderer) -> FrameResult {
+        FrameResult::Unchanged
+    }
+    fn texture(&self) -> &GlesTexture { &self.texture }
+    fn size(&self) -> (u32, u32) { (self.width, self.height) }
+}
+
 impl FrameProducer for HostileCheckerboard {
     fn update(&mut self, renderer: &mut GlesRenderer) -> FrameResult {
         self.frame_count += 1;

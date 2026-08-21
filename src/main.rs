@@ -12,7 +12,7 @@ mod window;
 use std::sync::Arc;
 
 use compositor::{ClientState, LookingGlass};
-use producer::HostileCheckerboard;
+use producer::{HostileCheckerboard, StaticColor};
 use smithay::backend::input::{AbsolutePositionEvent, InputEvent, KeyboardKeyEvent};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent};
@@ -51,16 +51,40 @@ fn main() {
     // Register the animated checkerboard frame producer
     // This proves the external frame producer pipeline works with continuous updates.
     // A Looking Glass KVMFR producer would be registered the same way.
+    // Register benchmark producers if BENCHMARK_VISUALS is set
+    let bench_count: usize = std::env::var("BENCHMARK_VISUALS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    // Always add the standard producers
     if let Some(prod) = HostileCheckerboard::new(
         state.backend.as_mut().map(|b| b.renderer()).unwrap(),
     ) {
         state.add_producer(Box::new(prod));
     }
-
-    // Register the KVMFR Looking Glass frame producer
-    // This will gracefully report "no device" if /dev/kvmfrN is absent
-    // or if liblgmp is not linked.
     state.add_producer(Box::new(kvmfr::KvmfrFrameProducer::new()));
+
+    // Create benchmark producers first, then add them to the state
+    let mut bench_producers: Vec<Box<dyn producer::FrameProducer>> = Vec::new();
+    if bench_count > 0 {
+        let renderer = state.backend.as_mut().map(|b| b.renderer()).unwrap();
+        tracing::info!(count = bench_count, "benchmark: creating visuals");
+        for i in 0..bench_count {
+            let r = ((i * 37) % 256) as u8;
+            let g = ((i * 71) % 256) as u8;
+            let b = ((i * 113) % 256) as u8;
+            if let Some(p) = StaticColor::new(renderer, r, g, b) {
+                bench_producers.push(Box::new(p));
+            }
+        }
+    }
+    for (i, p) in bench_producers.into_iter().enumerate() {
+        state.add_benchmark_visual(p, i, bench_count);
+    }
+    if bench_count > 0 {
+        tracing::info!(total = %(bench_count + 2), "benchmark scene ready");
+    }
 
     // Wayland socket listener
     let source = ListeningSocketSource::new_auto().expect("Failed to create listening socket");

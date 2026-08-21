@@ -280,6 +280,36 @@ impl LookingGlass {
         }
     }
 
+    /// Add a benchmark visual at a grid position
+    pub fn add_benchmark_visual(&mut self, mut producer: Box<dyn FrameProducer>, index: usize, total: usize) {
+        let Some(backend) = self.backend.as_mut() else { return };
+        let renderer = backend.renderer();
+        if !matches!(producer.update(renderer), FrameResult::Unchanged) { return; }
+        let (w, h) = producer.size();
+        let cols = (total as f32).sqrt().ceil() as i32;
+        let spacing = 160;
+        let gx = (index as i32 % cols) * spacing - (cols * spacing) / 2;
+        let gy = (index as i32 / cols) * spacing - (total as i32 / cols * spacing) / 2;
+
+        let mut visual = Visual::new(
+            VisualContent::ExternalTexture(producer.texture().clone()),
+            smithay::utils::Rectangle::new(
+                smithay::utils::Point::new(0, 0),
+                smithay::utils::Size::new(w as i32, h as i32),
+            ),
+        );
+        use cgmath::Deg;
+        use cgmath::Rotation3;
+        visual.transform.position = cgmath::Vector3::new(gx as f32, gy as f32, 0.0);
+        // Rotate odd rows slightly for 3D variety
+        if (index / cols as usize) % 2 == 1 {
+            visual.transform.rotation = cgmath::Quaternion::from_angle_y(Deg(10.0));
+        }
+        let vid = visual.id;
+        self.scene.add(visual);
+        self.producers.push((vid, producer));
+    }
+
     /// Register a frame producer and create its Visual in the scene.
     /// If the producer fails on its first update, it is not added.
     pub fn add_producer(&mut self, mut producer: Box<dyn FrameProducer>) {
