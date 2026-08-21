@@ -3,6 +3,7 @@ use cgmath::Matrix4;
 use cgmath::Point3;
 use cgmath::Rad;
 use cgmath::Vector3;
+use cgmath::Vector4;
 use tracing::info;
 
 use crate::scene::{Scene, VisualId};
@@ -145,7 +146,8 @@ impl Camera {
     }
 
     /// Position the camera to show all visuals in the scene.
-    /// Computes the bounding volume and places the camera at a suitable distance.
+    /// Computes the bounding volume (accounting for rotation) and places
+    /// the camera at a suitable distance.
     pub fn frame_all(&mut self, scene: &Scene) -> bool {
         if scene.visuals.is_empty() {
             return false;
@@ -153,20 +155,26 @@ impl Camera {
         let mut min = Vector3::new(f32::MAX, f32::MAX, f32::MAX);
         let mut max = Vector3::new(f32::MIN, f32::MIN, f32::MIN);
         for v in scene.iter() {
+            if v.window_state == crate::scene::WindowState::Minimized { continue; }
             let p = v.transform.position;
-            let hs = v.geometry.size;
-            let hw = hs.w as f32 * v.transform.scale.x * 0.5;
-            let hh = hs.h as f32 * v.transform.scale.y * 0.5;
-            let corners = [
-                p + Vector3::new(-hw, -hh, 0.0),
-                p + Vector3::new(hw, -hh, 0.0),
-                p + Vector3::new(-hw, hh, 0.0),
-                p + Vector3::new(hw, hh, 0.0),
+            // Build model matrix to get rotated corners
+            let m = Matrix4::from_translation(p)
+                * Matrix4::from(v.transform.rotation);
+            let half_w = v.total_width() * 0.5;
+            let half_h = v.total_height() * 0.5;
+            // Local-space corners, transformed by model matrix without scale
+            let local = [
+                Vector3::new(-half_w, -half_h, 0.0),
+                Vector3::new( half_w, -half_h, 0.0),
+                Vector3::new(-half_w,  half_h, 0.0),
+                Vector3::new( half_w,  half_h, 0.0),
             ];
-            for c in corners {
-                min.x = min.x.min(c.x); max.x = max.x.max(c.x);
-                min.y = min.y.min(c.y); max.y = max.y.max(c.y);
-                min.z = min.z.min(c.z); max.z = max.z.max(c.z);
+            for lc in &local {
+                let world = m * Vector4::new(lc.x, lc.y, lc.z, 1.0);
+                let wc = Vector3::new(world.x, world.y, world.z) / world.w;
+                min.x = min.x.min(wc.x); max.x = max.x.max(wc.x);
+                min.y = min.y.min(wc.y); max.y = max.y.max(wc.y);
+                min.z = min.z.min(wc.z); max.z = max.z.max(wc.z);
             }
         }
         let center = (min + max) * 0.5;

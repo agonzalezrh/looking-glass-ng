@@ -143,7 +143,6 @@ fn main() {
                         let key = event.key_code();
                         let pressed = event.state() == smithay::backend::input::KeyState::Pressed;
                         state.handle_key(u32::from(key), pressed);
-                        state.camera.handle_key(key.into(), pressed, 1.0);
                     }
                     InputEvent::PointerMotionAbsolute { event } => {
                         let x = event.x();

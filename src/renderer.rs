@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use cgmath::Matrix;
 use cgmath::Matrix4;
 use smithay::backend::renderer::gles::ffi;
@@ -9,6 +11,10 @@ use tracing::error;
 
 use crate::perf::PerfStats;
 use crate::scene::Scene;
+
+/// Global DrawGl cache, created once per GL context lifetime.
+/// Reset on context loss.
+static DRAW_GL: Mutex<Option<DrawGl>> = Mutex::new(None);
 
 const QUAD_VS: &str = "\
 attribute vec2 a_pos;
@@ -145,6 +151,16 @@ impl DrawGl {
     }
 }
 
+/// Get or create the cached DrawGl.
+/// Reset the cache if the GL context was lost (returns None on error).
+fn get_draw_gl(gl: &ffi::Gles2) -> Option<std::sync::MutexGuard<'static, Option<DrawGl>>> {
+    let mut guard = DRAW_GL.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(DrawGl::new(gl));
+    }
+    Some(guard)
+}
+
 fn draw_textured_quad(
     gl: &ffi::Gles2,
     draw: &DrawGl,
@@ -193,10 +209,13 @@ fn do_render(
         Err(_) => return Ok(()),
     };
 
-    let draw = match frame.with_context(|gl| DrawGl::new(gl)) {
-        Ok(d) => d,
-        Err(e) => {
-            error!(?e, "Failed to create GL objects");
+    // Initialize DrawGl once per GL context lifetime
+    let _ = frame.with_context(|gl| { get_draw_gl(gl); });
+    let draw_guard = DRAW_GL.lock().unwrap();
+    let draw = match draw_guard.as_ref() {
+        Some(d) => d,
+        None => {
+            error!("DrawGl not initialized");
             return Ok(());
         }
     };
@@ -225,7 +244,7 @@ fn do_render(
             * Matrix4::from(visual.transform.rotation)
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
         let mvp = proj * view * model;
-        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id, visual.selected, visual.focused, title_h));
+        let _ = frame.with_context(|gl| draw_textured_quad(gl, draw, &mvp, tex_id, visual.selected, visual.focused, title_h));
     }
 
     drop(frame);
@@ -257,9 +276,11 @@ pub fn render_scene(
     };
     perf.record_stage(PipelineStage::RenderBind, t_bind.elapsed().as_nanos() as u64);
 
-    let draw = match frame.with_context(|gl| DrawGl::new(gl)) {
-        Ok(d) => d,
-        Err(e) => { error!(?e, "GL init failed"); return Ok(()); }
+    let _ = frame.with_context(|gl| { get_draw_gl(gl); });
+    let draw_guard = DRAW_GL.lock().unwrap();
+    let draw = match draw_guard.as_ref() {
+        Some(d) => d,
+        None => { error!("DrawGl not initialized"); return Ok(()); }
     };
 
     let _ = frame.with_context(|gl| unsafe {

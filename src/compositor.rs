@@ -694,6 +694,12 @@ impl LookingGlass {
     /// Routes to the focused visual's InputSink.
     /// Tab key (23) is always consumed by the compositor for spatial mode toggle.
     pub fn handle_key(&mut self, linux_key: u32, pressed: bool) {
+        // Camera keyboard controls only when no visual has focus
+        // (otherwise keys would be sent to both the camera AND the focused visual)
+        if self.scene.focused_id.is_none() {
+            self.camera.handle_key(linux_key, pressed, 1.0);
+        }
+
         if pressed {
             // F1/F2/F3 -> switch workspaces 0/1/2 (X11 keycodes 67=F1, 68=F2, 69=F3)
             match linux_key {

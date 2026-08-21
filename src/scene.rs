@@ -895,7 +895,7 @@ mod tests {
     fn minimize_preserves_transform() {
         let mut scene = Scene::default();
         scene.focus(Some(VisualId(1)));
-        let pos = Vector3::new(100.0, 200.0, 300.0);
+        let _pos = Vector3::new(100.0, 200.0, 300.0);
         // We can't create a visual here, but we can test Scene methods
         // for VisualId that don't exist — they should return false
         assert!(!scene.minimize(VisualId(999)), "unknown visual cant minimize");

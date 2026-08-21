@@ -232,16 +232,39 @@ impl InputSink for KvmfrInputSink {
 
 // ── KVMFR Frame Producer ──────────────────────────────────────────────
 
+/// Utility to hold an LGMP mapping + client, freeing on drop.
+struct LgmpConnection {
+    _mapping: LgmpMemoryMapping,
+    client: *mut ffi::LGMPClient,
+    frame_queue: *mut ffi::LGMPClientQueue,
+    cursor_queue: Option<*mut ffi::LGMPClientQueue>,
+    texture: GlesTexture,
+    width: u32,
+    height: u32,
+}
+
+// Safety: single-threaded compositor
+unsafe impl Send for LgmpConnection {}
+
+impl Drop for LgmpConnection {
+    fn drop(&mut self) {
+        // lgmpClientFree takes *mut LGMPClient and sets it to null
+        unsafe {
+            ffi::lgmpClientFree(&mut self.client);
+        }
+    }
+}
+
 pub struct KvmfrFrameProducer {
     state: ProducerState,
     frame_count: u64,
-    _region: Option<MappedRegion>,
-    pub cursor_queue: Option<*mut ffi::LGMPClientQueue>,
+    pub connection: Option<LgmpConnection>,
 }
 
 enum ProducerState {
     Uninitialized,
     Simulated { texture: GlesTexture, width: u32, height: u32 },
+    LgmpConnected, // connection field holds the actual connection
     NoDevice,
 }
 
@@ -250,16 +273,13 @@ impl KvmfrFrameProducer {
         KvmfrFrameProducer {
             state: ProducerState::Uninitialized,
             frame_count: 0,
-            _region: None,
-            cursor_queue: None,
+            connection: None,
         }
     }
 
     /// Try transports in priority order, then init LGMP on the first that works.
     fn try_lgmp(&mut self, renderer: &mut GlesRenderer) -> Option<FrameResult> {
-        // 1) Try IVSHMEM /dev/kvmfr{N} (real Looking Glass hardware)
         let mapping = IvshmemTransport::open()
-            // 2) Fall back to POSIX SHM (integration testing)
             .or_else(|| PosixShmTransport::open("/looking-glass-ng-test"))?;
 
         let mem = mapping.ptr();
@@ -290,30 +310,27 @@ impl KvmfrFrameProducer {
         }
         info!(?client_id, ?remote_ver, "LGMP session OK");
 
-        let mut queue: *mut ffi::LGMPClientQueue = ptr::null_mut();
-        if unsafe { ffi::lgmpClientSubscribe(client, ffi::LGMP_Q_FRAME, &mut queue) } != 0 || queue.is_null() {
+        let mut frame_queue: *mut ffi::LGMPClientQueue = ptr::null_mut();
+        if unsafe { ffi::lgmpClientSubscribe(client, ffi::LGMP_Q_FRAME, &mut frame_queue) } != 0 || frame_queue.is_null() {
             warn!("lgmpClientSubscribe failed");
             unsafe { ffi::lgmpClientFree(&mut client) };
             return None;
         }
         info!("LGMP frame queue subscribed");
 
-        // Subscribe to cursor queue for input
         let mut cursor_queue: *mut ffi::LGMPClientQueue = ptr::null_mut();
-        if unsafe { ffi::lgmpClientSubscribe(client, ffi::LGMP_Q_CURSOR, &mut cursor_queue) } == 0 && !cursor_queue.is_null() {
+        let cursor_q = if unsafe { ffi::lgmpClientSubscribe(client, ffi::LGMP_Q_CURSOR, &mut cursor_queue) } == 0 && !cursor_queue.is_null() {
             info!("LGMP cursor queue subscribed");
-            self.cursor_queue = Some(cursor_queue);
+            Some(cursor_queue)
         } else {
             info!("LGMP cursor queue not available (input disabled)");
-        }
+            None
+        };
 
-        // Keep the mapping alive
-        self._region = Some(MappedRegion { mapping });
-
-        // Try to get a frame
-        unsafe { ffi::lgmpClientAdvanceToLast(queue); }
+        // Try to get the first frame to determine initial texture/size
+        unsafe { ffi::lgmpClientAdvanceToLast(frame_queue); }
         let mut msg = ffi::LGMPMessage { udata: 0, size: 0, mem: ptr::null_mut() };
-        let got_frame = unsafe { ffi::lgmpClientProcess(queue, &mut msg) } == 0 && !msg.mem.is_null();
+        let got_frame = unsafe { ffi::lgmpClientProcess(frame_queue, &mut msg) } == 0 && !msg.mem.is_null();
 
         if got_frame {
             let meta = unsafe { &*(msg.mem as *const [u32; 4]) };
@@ -325,9 +342,19 @@ impl KvmfrFrameProducer {
                 if let Ok(tex) = renderer.import_memory(pixels, Fourcc::Abgr8888,
                     (width as i32, height as i32).into(), false)
                 {
-                    unsafe { ffi::lgmpClientMessageDone(queue); }
+                    unsafe { ffi::lgmpClientMessageDone(frame_queue); }
                     info!(?width, ?height, "LGMP frame acquired");
-                    self.state = ProducerState::Simulated { texture: tex, width, height };
+
+                    self.connection = Some(LgmpConnection {
+                        _mapping: mapping,
+                        client,
+                        frame_queue,
+                        cursor_queue: cursor_q,
+                        texture: tex,
+                        width,
+                        height,
+                    });
+                    self.state = ProducerState::LgmpConnected;
                     return Some(FrameResult::Updated);
                 }
             }
@@ -344,7 +371,18 @@ impl KvmfrFrameProducer {
         }
         let tex = renderer.import_memory(&pixels, Fourcc::Abgr8888, (w as i32, h as i32).into(), false).ok()?;
         info!("LGMP transport connected, awaiting first frame");
-        self.state = ProducerState::Simulated { texture: tex, width: w, height: h };
+
+        // Store connection with placeholder texture
+        self.connection = Some(LgmpConnection {
+            _mapping: mapping,
+            client,
+            frame_queue,
+            cursor_queue: cursor_q,
+            texture: tex,
+            width: w,
+            height: h,
+        });
+        self.state = ProducerState::LgmpConnected;
         Some(FrameResult::Updated)
     }
 }
@@ -352,6 +390,8 @@ impl KvmfrFrameProducer {
 impl FrameProducer for KvmfrFrameProducer {
     fn update(&mut self, renderer: &mut GlesRenderer) -> FrameResult {
         self.frame_count += 1;
+
+        // On first call: try LGMP, fall back to simulated
         if self.frame_count == 1 && matches!(self.state, ProducerState::Uninitialized) {
             match self.try_lgmp(renderer) {
                 Some(r) => return r,
@@ -361,7 +401,47 @@ impl FrameProducer for KvmfrFrameProducer {
                 }
             }
         }
+
         match &mut self.state {
+            ProducerState::LgmpConnected => {
+                // Continuously read frames from LGMP queue
+                let conn = match &mut self.connection {
+                    Some(c) => c,
+                    None => return FrameResult::Error("LgmpConnected but no connection".into()),
+                };
+                let queue = conn.frame_queue;
+                unsafe { ffi::lgmpClientAdvanceToLast(queue); }
+                let mut msg = ffi::LGMPMessage { udata: 0, size: 0, mem: ptr::null_mut() };
+                if unsafe { ffi::lgmpClientProcess(queue, &mut msg) } != 0 || msg.mem.is_null() {
+                    return FrameResult::Unchanged;
+                }
+                let meta = unsafe { &*(msg.mem as *const [u32; 4]) };
+                let width = meta[1];
+                let height = meta[2];
+                let frame_ptr = msg.udata as *const u8;
+                if frame_ptr.is_null() || width == 0 || height == 0 {
+                    unsafe { ffi::lgmpClientMessageDone(queue); }
+                    return FrameResult::Unchanged;
+                }
+
+                // Import new frame
+                let pixels = unsafe { std::slice::from_raw_parts(frame_ptr, (width * height * 4) as usize) };
+                match renderer.import_memory(pixels, Fourcc::Abgr8888,
+                    (width as i32, height as i32).into(), false)
+                {
+                    Ok(tex) => {
+                        conn.texture = tex;
+                        conn.width = width;
+                        conn.height = height;
+                        unsafe { ffi::lgmpClientMessageDone(queue); }
+                        FrameResult::Updated
+                    }
+                    Err(e) => {
+                        unsafe { ffi::lgmpClientMessageDone(queue); }
+                        FrameResult::Error(format!("LGMP tex import: {:?}", e))
+                    }
+                }
+            }
             ProducerState::Simulated { ref mut texture, .. } => {
                 if self.frame_count % 5 != 0 { return FrameResult::Unchanged; }
                 let mut pixels = vec![0u8; 256 * 256 * 4];
@@ -387,29 +467,37 @@ impl FrameProducer for KvmfrFrameProducer {
     }
 
     fn texture(&self) -> &GlesTexture {
+        if let ProducerState::LgmpConnected = &self.state {
+            return &self.connection.as_ref().unwrap().texture;
+        }
         match &self.state { ProducerState::Simulated { texture, .. } => texture, _ => unreachable!() }
     }
 
     fn size(&self) -> (u32, u32) {
+        if let ProducerState::LgmpConnected = &self.state {
+            let conn = self.connection.as_ref().unwrap();
+            return (conn.width, conn.height);
+        }
         match &self.state { ProducerState::Simulated { width, height, .. } => (*width, *height), _ => (0, 0) }
     }
 
     fn create_input_sink(&mut self) -> Option<Box<dyn InputSink>> {
-        if let Some(q) = self.cursor_queue {
-            Some(Box::new(KvmfrInputSink::new(q)) as Box<dyn InputSink>)
-        } else {
-            #[derive(Debug)]
-            struct LogInputSink;
-            impl InputSink for LogInputSink {
-                fn handle_pointer(&mut self, kind: PointerEventKind, u: f64, v: f64) {
-                    info!(?kind, u, v, "kvmfr input (simulated)");
-                }
-                fn handle_keyboard(&mut self, event: crate::input_router::KeyboardEvent) {
-                    info!(key = event.key, pressed = event.pressed, "kvmfr keyboard (simulated)");
-                }
+        if let ProducerState::LgmpConnected = &self.state {
+            if let Some(q) = self.connection.as_ref().and_then(|c| c.cursor_queue) {
+                return Some(Box::new(KvmfrInputSink::new(q)) as Box<dyn InputSink>);
             }
-            Some(Box::new(LogInputSink))
         }
+        #[derive(Debug)]
+        struct LogInputSink;
+        impl InputSink for LogInputSink {
+            fn handle_pointer(&mut self, kind: PointerEventKind, u: f64, v: f64) {
+                info!(?kind, u, v, "kvmfr input (simulated)");
+            }
+            fn handle_keyboard(&mut self, event: crate::input_router::KeyboardEvent) {
+                info!(key = event.key, pressed = event.pressed, "kvmfr keyboard (simulated)");
+            }
+        }
+        Some(Box::new(LogInputSink))
     }
 }
 
