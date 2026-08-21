@@ -112,7 +112,13 @@ impl InteractionController {
     }
 
     /// Handle a pointer button press.
-    /// Selects the visual under the cursor and starts a drag if manipulation is enabled.
+    ///
+    /// Always picks and selects the visual under the cursor (if any).
+    /// Starts a manipulation drag only when a modifier key (shift/ctrl/alt) is held.
+    ///
+    /// Returns `Some(ManipMode)` if a drag was started, `None` otherwise.
+    /// The caller (LookingGlass) uses this to decide whether to route the
+    /// event to content input or scene manipulation.
     pub fn handle_pointer_down(
         &mut self,
         x: f64,
@@ -122,38 +128,36 @@ impl InteractionController {
         spatial_mode: bool,
         shift: bool,
         ctrl: bool,
-        _alt: bool,
-    ) {
+        alt: bool,
+    ) -> Option<ManipMode> {
         self.mouse_x = x;
         self.mouse_y = y;
         let (nx, ny) = self.ndc(x, y);
         let pv = self.proj_matrix(camera, spatial_mode) * camera.view_matrix();
 
         if !self.selection_enabled {
-            return;
+            return None;
         }
 
         let picked = scene.pick(&pv, nx, ny);
         let Some((vid, _dist)) = picked else {
             scene.select(None);
-            return;
+            return None;
         };
 
         scene.select(Some(vid));
 
+        // Modifier keys determine manipulation mode.
+        // Without modifiers, no manipulation starts — the event is for content.
         let mode = if shift {
             ManipMode::RotateY
         } else if ctrl {
             ManipMode::RotateZ
-        } else if self.manipulation_enabled {
-            ManipMode::Translate
+        } else if alt {
+            ManipMode::RotateX
         } else {
-            ManipMode::None
+            return None;
         };
-
-        if mode == ManipMode::None {
-            return;
-        }
 
         let (ray_origin, ray_far) = self.world_ray(nx, ny, camera, spatial_mode);
         let ray_dir = (ray_far - ray_origin).normalize();
@@ -172,8 +176,15 @@ impl InteractionController {
                     start_rotation: visual.transform.rotation,
                     start_scale: visual.transform.scale,
                 });
+                return Some(mode);
             }
         }
+        None
+    }
+
+    /// Whether a manipulation drag is in progress.
+    pub fn is_dragging(&self) -> bool {
+        self.active.is_some()
     }
 
     /// Handle pointer button release.

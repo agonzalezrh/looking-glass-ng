@@ -2,6 +2,7 @@ mod backend;
 mod compositor;
 mod config;
 mod input;
+mod input_router;
 mod interaction;
 mod kvmfr;
 mod perf;
@@ -155,7 +156,8 @@ fn main() {
                             let (mx, my) = state.last_mouse;
                             state.handle_pointer_down(mx, my, false, false, false);
                         } else {
-                            state.handle_pointer_up();
+                            let (mx, my) = state.last_mouse;
+                            state.handle_pointer_up(mx, my);
                         }
                     }
                     _ => {}

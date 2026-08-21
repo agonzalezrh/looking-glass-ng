@@ -35,7 +35,12 @@ use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::shm::ShmHandler;
 use smithay::wayland::shm::ShmState;
+use std::collections::HashMap;
+
+use cgmath::Matrix4;
+
 use crate::input::Camera;
+use crate::input_router::{self, InputSink, PointerEventKind};
 use crate::interaction::InteractionController;
 use crate::perf::PerfStats;
 use crate::producer::{FrameProducer, FrameResult};
@@ -132,6 +137,7 @@ pub struct LookingGlass {
     pub window_size: (f32, f32),
     pub last_mouse: (f64, f64),
     pub interaction: InteractionController,
+    input_sinks: HashMap<VisualId, Box<dyn InputSink>>,
 }
 
 impl LookingGlass {
@@ -160,6 +166,7 @@ impl LookingGlass {
             window_size: (1280.0, 720.0),
             last_mouse: (0.0, 0.0),
             interaction: InteractionController::new(),
+            input_sinks: HashMap::new(),
         }
     }
 
@@ -443,17 +450,63 @@ impl LookingGlass {
         self.perf.record_frame();
     }
 
+    /// Compute proj × view matrix for the current camera.
+    fn proj_view(&self) -> Matrix4<f32> {
+        let (w, h) = self.window_size;
+        let proj = if self.spatial_mode {
+            cgmath::perspective(cgmath::Deg(45.0), w / h, 1.0, 10000.0)
+        } else {
+            cgmath::ortho(-w / 2.0, w / 2.0, -h / 2.0, h / 2.0, -1000.0, 1000.0)
+        };
+        proj * self.camera.view_matrix()
+    }
+
+    /// Route a pointer event to the selected visual's InputSink.
+    fn route_to_content(&mut self, kind: PointerEventKind, x: f64, y: f64) {
+        let Some(vid) = self.scene.selected_id else { return };
+        let (w, h) = self.window_size;
+        let ndc_x = (x as f32 / w) * 2.0 - 1.0;
+        let ndc_y = -((y as f32 / h) * 2.0 - 1.0);
+        let pv = self.proj_view();
+
+        // Extract transform and size before borrowing input_sinks
+        let transform_and_size = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| {
+            (v.transform.clone(), v.geometry.size.w as f32, v.geometry.size.h as f32)
+        });
+        let Some((transform, gw, gh)) = transform_and_size else { return };
+        let Some(sink) = self.input_sinks.get_mut(&vid) else { return };
+
+        if let Some((u, v)) = input_router::screen_to_visual_uv(
+            &pv, ndc_x, ndc_y, &transform, gw, gh,
+        ) {
+            sink.handle_pointer(kind, u, v);
+        }
+    }
+
     /// Public entry point for a pointer button press.
     pub fn handle_pointer_down(&mut self, x: f64, y: f64, shift: bool, ctrl: bool, alt: bool) {
         self.interaction.window_size = self.window_size;
-        self.interaction.handle_pointer_down(
+        let mode = self.interaction.handle_pointer_down(
             x, y, &mut self.scene, &self.camera, self.spatial_mode, shift, ctrl, alt,
         );
+        match mode {
+            Some(_) => {
+                // Manipulation started — event consumed by compositor
+            }
+            None => {
+                // No manipulation — route to content if a visual is selected
+                self.route_to_content(PointerEventKind::Down, x, y);
+            }
+        }
     }
 
     /// Public entry point for pointer button release.
-    pub fn handle_pointer_up(&mut self) {
+    pub fn handle_pointer_up(&mut self, x: f64, y: f64) {
+        let has_active = self.interaction.is_dragging();
         self.interaction.handle_pointer_up();
+        if !has_active {
+            self.route_to_content(PointerEventKind::Up, x, y);
+        }
     }
 
     /// Public entry point for pointer motion.
