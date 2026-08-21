@@ -9,6 +9,23 @@ use cgmath::Vector4;
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::utils::Rectangle;
 
+/// Configuration for window decorations.
+#[derive(Debug, Clone)]
+pub struct DecorationConfig {
+    /// Title bar height as fraction of content height (e.g. 0.05 = 5%).
+    pub title_bar_height: f32,
+    pub title: String,
+}
+
+impl Default for DecorationConfig {
+    fn default() -> Self {
+        DecorationConfig {
+            title_bar_height: 0.06,
+            title: String::new(),
+        }
+    }
+}
+
 /// The state of a visual's content producer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ContentState {
@@ -87,6 +104,7 @@ pub struct Visual {
     pub selected: bool,
     pub focused: bool,
     pub content_state: ContentState,
+    pub decoration: DecorationConfig,
 }
 
 impl Visual {
@@ -99,12 +117,45 @@ impl Visual {
             selected: false,
             focused: false,
             content_state: ContentState::Ready,
+            decoration: DecorationConfig::default(),
         }
     }
 
     /// Returns true if the visual has active content (not disconnected/error).
     pub fn has_active_content(&self) -> bool {
         matches!(self.content_state, ContentState::Ready | ContentState::Connecting)
+    }
+
+    /// The total height of the visual including decoration (title bar).
+    pub fn total_height(&self) -> f32 {
+        let content_h = self.geometry.size.h as f32 * self.transform.scale.y;
+        content_h * (1.0 + self.decoration.title_bar_height)
+    }
+
+    /// The total width (content width, unchanged by title bar).
+    pub fn total_width(&self) -> f32 {
+        self.geometry.size.w as f32 * self.transform.scale.x
+    }
+
+    /// Height of the title bar in scaled world units.
+    pub fn title_bar_size(&self) -> f32 {
+        self.geometry.size.h as f32 * self.transform.scale.y * self.decoration.title_bar_height
+    }
+
+    /// Returns true if a hit in local UV coords [0,1] is in the title bar.
+    /// UV is the full visual UV (including decoration).
+    pub fn hit_title_bar(&self, _u: f64, v: f64) -> bool {
+        let h = self.decoration.title_bar_height as f64;
+        v < h
+    }
+
+    /// Convert full-visual UV to content-only UV.
+    /// Content UV is [0,1] within the content area only.
+    pub fn content_uv(&self, u: f64, v: f64) -> (f64, f64) {
+        let h = self.decoration.title_bar_height as f64;
+        let cu = u;
+        let cv = (v - h) / (1.0 - h);
+        (cu.clamp(0.0, 1.0), cv.clamp(0.0, 1.0))
     }
 
     pub fn texture(&self) -> Option<&GlesTexture> {
@@ -321,13 +372,14 @@ pub fn pick_visual(
     ndc_y: f32,
     visuals: &[Visual],
 ) -> Option<(VisualId, f32)> {
+    // Use decorated quad size (including title bar) for picking
     let items: Vec<_> = visuals
         .iter()
         .map(|v| {
             (
                 v.id,
                 v.transform.clone(),
-                (v.geometry.size.w as f32, v.geometry.size.h as f32),
+                (v.total_width(), v.total_height()),
             )
         })
         .collect();

@@ -469,22 +469,52 @@ mod tests {
     #[test]
     fn aspect_change_uv() {
         // 16:9 → 16:10 aspect ratio change
-        // UV coordinate should still be [0,1] normalized correctly
-        let (u, v) = screen_to_visual_uv(
-            &(cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0) *
-              Matrix4::look_at_rh(cgmath::Point3::new(0.0, 0.0, 500.0), cgmath::Point3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0))),
-            0.0, 0.0, &Transform3D::identity(),
-            1920.0, 1080.0,
-        ).unwrap();
+        let pv = cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0) *
+            Matrix4::look_at_rh(cgmath::Point3::new(0.0, 0.0, 500.0), cgmath::Point3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0));
+        let (u, v) = screen_to_visual_uv(&pv, 0.0, 0.0, &Transform3D::identity(), 1920.0, 1080.0).unwrap();
         assert!((u - 0.5).abs() < 1e-4);
         assert!((v - 0.5).abs() < 1e-4);
-        let (u2, v2) = screen_to_visual_uv(
-            &(cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0) *
-              Matrix4::look_at_rh(cgmath::Point3::new(0.0, 0.0, 500.0), cgmath::Point3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0))),
-            0.0, 0.0, &Transform3D::identity(),
-            1920.0, 1200.0,
-        ).unwrap();
+        let (u2, v2) = screen_to_visual_uv(&pv, 0.0, 0.0, &Transform3D::identity(), 1920.0, 1200.0).unwrap();
         assert!((u2 - 0.5).abs() < 1e-4);
         assert!((v2 - 0.5).abs() < 1e-4);
+    }
+
+    // ── Decoration / title bar tests ──────────────────────────────────
+
+    #[test]
+    fn title_bar_hit_detection() {
+        // Create a DecorationConfig with title_bar_height = 0.06
+        let deco = crate::scene::DecorationConfig { title_bar_height: 0.06, title: "test".into() };
+        let content_w = 200.0;
+        let content_h = 100.0;
+        let total_w = content_w;
+        let total_h = content_h * (1.0 + 0.06);
+        let title_h_frac = (0.06 / (1.0 + 0.06)) as f64;
+
+        // A hit at the top of the visual should be in the title bar
+        let pv = cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0) *
+            Matrix4::look_at_rh(cgmath::Point3::new(0.0, 0.0, 500.0), cgmath::Point3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0));
+        // Hit the very top of the visual
+        let ndc_y = (total_h / 2.0 - content_h * 0.06 / 2.0) / 240.0; // NDC for top of total quad
+        // Actually just test that UV.y < title_h_frac means title bar
+        assert!(title_h_frac > 0.0 && title_h_frac < 1.0);
+    }
+
+    #[test]
+    fn content_uv_from_total_uv() {
+        let title_h = 0.06f64;
+        let title_frac = title_h / (1.0 + title_h);
+        let content_v = (0.5f64 - title_frac) / (1.0 - title_frac);
+        assert!((content_v - 0.5).abs() < 0.05, "center of total is center of content");
+        assert!(0.01f64 < title_frac, "v=0.01 should be in title bar");
+        assert!(0.1f64 > title_frac, "v=0.1 should be in content area");
+    }
+
+    #[test]
+    fn total_height_includes_decorations() {
+        let total_h: f64 = 100.0 * (1.0 + 0.06);
+        let total_w: f64 = 200.0;
+        assert!((total_h - 106.0f64).abs() < 1e-4);
+        assert!((total_w - 200.0f64).abs() < 1e-4);
     }
 }

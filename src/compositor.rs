@@ -503,6 +503,7 @@ impl LookingGlass {
 
     /// Route a pointer event to the selected visual's InputSink.
     /// Focus follows click: sets focused visual to the selected one.
+    /// Title bar hits are consumed by the compositor (no content event).
     fn route_to_content(&mut self, kind: PointerEventKind, x: f64, y: f64) {
         let Some(vid) = self.scene.selected_id else { return };
         if !self.scene.is_active(vid) { return }
@@ -519,16 +520,26 @@ impl LookingGlass {
         let ndc_y = -((y as f32 / h) * 2.0 - 1.0);
         let pv = self.proj_view();
 
-        let transform_and_size = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| {
-            (v.transform.clone(), v.geometry.size.w as f32, v.geometry.size.h as f32)
+        // Use total decorated size for UV computation
+        let data = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| {
+            (v.transform.clone(), v.total_width(), v.total_height(), v.decoration.title_bar_height)
         });
-        let Some((transform, gw, gh)) = transform_and_size else { return };
-        let Some(sink) = self.input_sinks.get_mut(&vid) else { return };
+        let Some((transform, gw, gh, title_h)) = data else { return };
 
+        // Compute UV in full decorated space
         if let Some((u, v)) = input_router::screen_to_visual_uv(
             &pv, ndc_x, ndc_y, &transform, gw, gh,
         ) {
-            sink.handle_pointer(kind, u, v);
+            // Title bar hit -> compositor action (no content event)
+            let title_frac = (title_h / (1.0 + title_h)) as f64;
+            if v < title_frac {
+                info!(?vid, "title bar hit, compositor consumes");
+                return;
+            }
+            // Content area -> route to InputSink with content-local UV
+            let content_v = (v - title_frac) / (1.0 - title_frac);
+            let Some(sink) = self.input_sinks.get_mut(&vid) else { return };
+            sink.handle_pointer(kind, u.clamp(0.0, 1.0), content_v.clamp(0.0, 1.0));
         }
     }
 

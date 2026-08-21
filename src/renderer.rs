@@ -27,25 +27,52 @@ varying vec2 v_uv;
 uniform sampler2D u_tex;
 uniform float u_selected;
 uniform float u_focused;
+uniform float u_title_h;
 void main() {
     vec2 uv = v_uv;
     float b = 0.05;
+    float title_border = 0.02;
     bvec4 edge = bvec4(
         uv.x < b || uv.x > 1.0 - b,
         uv.y < b || uv.y > 1.0 - b,
         false,
         false
     );
-    if (any(edge)) {
-        if (u_selected > 0.5) {
-            gl_FragColor = vec4(1.0, 0.84, 0.0, 1.0);
-        } else if (u_focused > 0.5) {
-            gl_FragColor = vec4(0.3, 0.9, 0.3, 1.0);
+    if (uv.y < u_title_h) {
+        // Title bar area
+        bool title_edge = uv.x < title_border || uv.x > 1.0 - title_border ||
+                          uv.y < title_border || uv.y > u_title_h - title_border;
+        if (title_edge) {
+            if (u_selected > 0.5) {
+                gl_FragColor = vec4(0.8, 0.64, 0.0, 1.0);
+            } else if (u_focused > 0.5) {
+                gl_FragColor = vec4(0.2, 0.7, 0.2, 1.0);
+            } else {
+                gl_FragColor = vec4(0.0, 0.7, 0.7, 1.0);
+            }
         } else {
-            gl_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
+            if (u_selected > 0.5) {
+                gl_FragColor = vec4(0.45, 0.35, 0.1, 0.9);
+            } else if (u_focused > 0.5) {
+                gl_FragColor = vec4(0.15, 0.35, 0.15, 0.9);
+            } else {
+                gl_FragColor = vec4(0.1, 0.25, 0.25, 0.9);
+            }
         }
     } else {
-        gl_FragColor = texture2D(u_tex, uv);
+        // Content area
+        vec2 content_uv = vec2(uv.x, (uv.y - u_title_h) / (1.0 - u_title_h));
+        if (any(edge)) {
+            if (u_selected > 0.5) {
+                gl_FragColor = vec4(1.0, 0.84, 0.0, 1.0);
+            } else if (u_focused > 0.5) {
+                gl_FragColor = vec4(0.3, 0.9, 0.3, 1.0);
+            } else {
+                gl_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
+            }
+        } else {
+            gl_FragColor = texture2D(u_tex, content_uv);
+        }
     }
 }
 ";
@@ -58,6 +85,7 @@ struct DrawGl {
     u_tex: i32,
     u_selected: i32,
     u_focused: i32,
+    u_title_h: i32,
     vbo: u32,
 }
 
@@ -79,6 +107,7 @@ impl DrawGl {
         let u_tex = unsafe { gl.GetUniformLocation(program, b"u_tex\0".as_ptr() as *const i8) };
         let u_selected = unsafe { gl.GetUniformLocation(program, b"u_selected\0".as_ptr() as *const i8) };
         let u_focused = unsafe { gl.GetUniformLocation(program, b"u_focused\0".as_ptr() as *const i8) };
+        let u_title_h = unsafe { gl.GetUniformLocation(program, b"u_title_h\0".as_ptr() as *const i8) };
         let mut vbo = 0;
         unsafe { gl.GenBuffers(1, &mut vbo) };
         let verts: [f32; 16] = [
@@ -92,7 +121,7 @@ impl DrawGl {
             gl.BufferData(ffi::ARRAY_BUFFER, std::mem::size_of_val(&verts) as isize,
                 verts.as_ptr() as *const std::ffi::c_void, ffi::STATIC_DRAW);
         }
-        DrawGl { program, a_pos, a_uv, u_mvp, u_tex, u_selected, u_focused, vbo }
+        DrawGl { program, a_pos, a_uv, u_mvp, u_tex, u_selected, u_focused, u_title_h, vbo }
     }
 
     fn compile(gl: &ffi::Gles2, kind: u32, src: &str) -> u32 {
@@ -123,12 +152,14 @@ fn draw_textured_quad(
     tex_id: u32,
     selected: bool,
     focused: bool,
+    title_h: f32,
 ) {
     unsafe {
         gl.UseProgram(draw.program);
         gl.UniformMatrix4fv(draw.u_mvp, 1, 0, mvp.as_ptr());
         gl.Uniform1f(draw.u_selected, if selected { 1.0 } else { 0.0 });
         gl.Uniform1f(draw.u_focused, if focused { 1.0 } else { 0.0 });
+        gl.Uniform1f(draw.u_title_h, title_h);
         gl.ActiveTexture(ffi::TEXTURE0);
         gl.BindTexture(ffi::TEXTURE_2D, tex_id);
         gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
@@ -184,15 +215,16 @@ fn do_render(
     for visual in scene.iter() {
         let Some(texture) = visual.texture() else { continue };
         let tex_id = texture.tex_id();
-        let gw = texture.size().w as f32;
-        let gh = texture.size().h as f32;
+        let gw = visual.total_width();
+        let gh = visual.total_height();
+        let title_h = visual.decoration.title_bar_height / (1.0 + visual.decoration.title_bar_height);
 
         let pos = visual.transform.position;
         let model = Matrix4::from_translation(pos)
             * Matrix4::from(visual.transform.rotation)
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
         let mvp = proj * view * model;
-        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id, visual.selected, visual.focused));
+        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id, visual.selected, visual.focused, title_h));
     }
 
     drop(frame);
@@ -245,14 +277,15 @@ pub fn render_scene(
     for visual in scene.iter() {
         let Some(texture) = visual.texture() else { continue };
         let tex_id = texture.tex_id();
-        let gw = texture.size().w as f32;
-        let gh = texture.size().h as f32;
+        let gw = visual.total_width();
+        let gh = visual.total_height();
+        let title_h = visual.decoration.title_bar_height / (1.0 + visual.decoration.title_bar_height);
         let pos = visual.transform.position;
         let model = Matrix4::from_translation(pos)
             * Matrix4::from(visual.transform.rotation)
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
         let mvp = proj * view * model;
-        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id, visual.selected, visual.focused));
+        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id, visual.selected, visual.focused, title_h));
     }
     perf.record_stage(PipelineStage::RenderDraw, t_draw.elapsed().as_nanos() as u64);
 
