@@ -2,6 +2,7 @@ mod backend;
 mod compositor;
 mod config;
 mod input;
+mod interaction;
 mod kvmfr;
 mod perf;
 mod producer;
@@ -138,7 +139,6 @@ fn main() {
                     InputEvent::Keyboard { event } => {
                         let key = event.key_code();
                         let pressed = event.state() == smithay::backend::input::KeyState::Pressed;
-                        // Tab key (keycode 23) toggles spatial mode
                         if u32::from(key) == 23 && pressed {
                             state.spatial_mode = !state.spatial_mode;
                             tracing::info!(spatial_mode = state.spatial_mode, "mode toggled");
@@ -148,13 +148,14 @@ fn main() {
                     InputEvent::PointerMotionAbsolute { event } => {
                         let x = event.x();
                         let y = event.y();
-                        state.last_mouse = (x, y);
-                        state.camera.handle_mouse_absolute(x, y);
+                        state.handle_pointer_move(x, y);
                     }
                     InputEvent::PointerButton { event } => {
                         if event.state() == smithay::backend::input::ButtonState::Pressed {
                             let (mx, my) = state.last_mouse;
-                            state.handle_click(mx, my);
+                            state.handle_pointer_down(mx, my, false, false, false);
+                        } else {
+                            state.handle_pointer_up();
                         }
                     }
                     _ => {}

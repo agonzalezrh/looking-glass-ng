@@ -36,6 +36,7 @@ use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::shm::ShmHandler;
 use smithay::wayland::shm::ShmState;
 use crate::input::Camera;
+use crate::interaction::InteractionController;
 use crate::perf::PerfStats;
 use crate::producer::{FrameProducer, FrameResult};
 use crate::scene::{Scene, Visual, VisualContent, VisualId};
@@ -130,6 +131,7 @@ pub struct LookingGlass {
     pub perf: PerfStats,
     pub window_size: (f32, f32),
     pub last_mouse: (f64, f64),
+    pub interaction: InteractionController,
 }
 
 impl LookingGlass {
@@ -157,6 +159,7 @@ impl LookingGlass {
             perf: PerfStats::new(),
             window_size: (1280.0, 720.0),
             last_mouse: (0.0, 0.0),
+            interaction: InteractionController::new(),
         }
     }
 
@@ -440,30 +443,24 @@ impl LookingGlass {
         self.perf.record_frame();
     }
 
-    pub fn handle_click(&mut self, x: f64, y: f64) {
-        let (w, h) = self.window_size;
-        if w <= 0.0 || h <= 0.0 {
-            return;
-        }
-        let ndc_x = (x as f32 / w) * 2.0 - 1.0;
-        let ndc_y = -((y as f32 / h) * 2.0 - 1.0);
+    /// Public entry point for a pointer button press.
+    pub fn handle_pointer_down(&mut self, x: f64, y: f64, shift: bool, ctrl: bool, alt: bool) {
+        self.interaction.window_size = self.window_size;
+        self.interaction.handle_pointer_down(
+            x, y, &mut self.scene, &self.camera, self.spatial_mode, shift, ctrl, alt,
+        );
+    }
 
-        let view = self.camera.view_matrix();
-        let proj = if self.spatial_mode {
-            cgmath::perspective(cgmath::Deg(45.0), w / h, 1.0, 10000.0)
-        } else {
-            cgmath::ortho(-w / 2.0, w / 2.0, -h / 2.0, h / 2.0, -1000.0, 1000.0)
-        };
-        let pv = proj * view;
+    /// Public entry point for pointer button release.
+    pub fn handle_pointer_up(&mut self) {
+        self.interaction.handle_pointer_up();
+    }
 
-        let picked = self.scene.pick(&pv, ndc_x, ndc_y);
-        if let Some((vid, dist)) = picked {
-            self.scene.select(Some(vid));
-            info!(?vid, dist, "visual selected");
-        } else {
-            self.scene.select(None);
-            info!("deselected");
-        }
+    /// Public entry point for pointer motion.
+    pub fn handle_pointer_move(&mut self, x: f64, y: f64) {
+        self.last_mouse = (x, y);
+        self.interaction.window_size = self.window_size;
+        self.interaction.handle_pointer_move(x, y, &mut self.scene, &self.camera, self.spatial_mode);
     }
 }
 
