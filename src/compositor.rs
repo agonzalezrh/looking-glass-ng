@@ -295,6 +295,12 @@ impl LookingGlass {
     }
 
     /// Add a benchmark visual at a grid position
+    /// Register an InputSink for a visual.
+    pub fn register_input_sink(&mut self, vid: VisualId, sink: Box<dyn InputSink>) {
+        self.input_sinks.insert(vid, sink);
+        info!(?vid, "input sink registered");
+    }
+
     pub fn add_benchmark_visual(&mut self, mut producer: Box<dyn FrameProducer>, index: usize, total: usize) {
         let Some(backend) = self.backend.as_mut() else { return };
         let renderer = backend.renderer();
@@ -326,38 +332,43 @@ impl LookingGlass {
 
     /// Register a frame producer and create its Visual in the scene.
     /// If the producer fails on its first update, it is not added.
-    pub fn add_producer(&mut self, mut producer: Box<dyn FrameProducer>) {
-        let Some(backend) = self.backend.as_mut() else { return };
+    /// Returns the VisualId if the producer was registered successfully.
+    pub fn add_producer(&mut self, mut producer: Box<dyn FrameProducer>) -> Option<VisualId> {
+        let Some(backend) = self.backend.as_mut() else { return None };
         let renderer = backend.renderer();
-        match producer.update(renderer) {
-            FrameResult::Updated | FrameResult::Unchanged | FrameResult::Resized(_, _) => {
-                let (w, h) = producer.size();
-                let tex = producer.texture().clone();
-                let mut visual = Visual::new(
-                    VisualContent::ExternalTexture(tex),
-                    smithay::utils::Rectangle::new(
-                        smithay::utils::Point::new(0, 0),
-                        smithay::utils::Size::new(w as i32, h as i32),
-                    ),
-                );
-                visual.transform.position = cgmath::Vector3::new(0.0, 200.0, 0.0);
-                let vid = visual.id;
-                self.scene.add(visual);
-                self.producers.push((vid, producer));
-                info!(visual_id = ?vid, width = w, height = h, "frame producer registered");
+        let result = producer.update(renderer);
+        let is_ok = matches!(result, FrameResult::Updated | FrameResult::Unchanged | FrameResult::Resized(_, _));
+        if !is_ok {
+            match result {
+                FrameResult::Error(msg) => warn!(?msg, "frame producer not added: initial update failed"),
+                FrameResult::Finished => info!("frame producer finished before registration"),
+                _ => {}
             }
-            FrameResult::Error(msg) => {
-                warn!(?msg, "frame producer not added: initial update failed");
-            }
-            FrameResult::Finished => {
-                info!("frame producer finished before registration");
-            }
-            FrameResult::Unchanged => {
-                // Producer has a valid state but no new frame — register it anyway
-                // (some producers like KVMFR may connect asynchronously)
-                info!("frame producer registered (no initial frame)");
-            }
+            return None;
         }
+
+        let (w, h) = producer.size();
+        let tex = producer.texture().clone();
+        let mut visual = Visual::new(
+            VisualContent::ExternalTexture(tex),
+            smithay::utils::Rectangle::new(
+                smithay::utils::Point::new(0, 0),
+                smithay::utils::Size::new(w as i32, h as i32),
+            ),
+        );
+        visual.transform.position = cgmath::Vector3::new(0.0, 200.0, 0.0);
+        let vid = visual.id;
+
+        // Try to create an InputSink from the producer before moving it
+        if let Some(sink) = producer.create_input_sink() {
+            self.input_sinks.insert(vid, sink);
+            info!(?vid, "input sink registered from producer");
+        }
+
+        self.scene.add(visual);
+        self.producers.push((vid, producer));
+        info!(visual_id = ?vid, width = w, height = h, "frame producer registered");
+        Some(vid)
     }
 
     pub fn render(&mut self) {

@@ -15,6 +15,7 @@ use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::ImportMem;
 use tracing::{info, warn};
 
+use crate::input_router::{InputSink, PointerEventKind};
 use crate::producer::{FrameProducer, FrameResult};
 
 // ── LGMP FFI ──────────────────────────────────────────────────────────
@@ -25,6 +26,17 @@ mod ffi {
     pub type LGMPClientQueue = c_void;
 
     pub const LGMP_Q_FRAME: u32 = 2;
+    pub const LGMP_Q_CURSOR: u32 = 1;
+
+    /// Cursor input message format expected by Looking Glass.
+    /// type=0: move (x,y), type=1: button (button, pressed, 0, 0)
+    #[repr(C, packed)]
+    pub struct CursorChannelMessage {
+        pub msg_type: u32,
+        pub x: u32,
+        pub y: u32,
+        pub buttons: u32,
+    }
 
     #[repr(C)]
     pub struct LGMPMessage {
@@ -46,6 +58,9 @@ mod ffi {
         pub fn lgmpClientAdvanceToLast(queue: *mut LGMPClientQueue) -> i32;
         pub fn lgmpClientProcess(queue: *mut LGMPClientQueue, result: *mut LGMPMessage) -> i32;
         pub fn lgmpClientMessageDone(queue: *mut LGMPClientQueue) -> i32;
+        pub fn lgmpClientSendData(
+            queue: *mut LGMPClientQueue, data: *const u8, size: u32, serial: *mut u32,
+        ) -> i32;
     }
 }
 
@@ -161,12 +176,67 @@ impl Drop for MappedRegion {
     }
 }
 
+// ── KVMFR Input Sink ─────────────────────────────────────────────────
+
+/// Sends pointer events to the KVMFR guest via LGMP cursor queue.
+#[derive(Debug)]
+pub struct KvmfrInputSink {
+    cursor_queue: *mut ffi::LGMPClientQueue,
+}
+
+// Safety: cursor_queue is only accessed from the main thread (single-threaded compositor).
+unsafe impl Send for KvmfrInputSink {}
+unsafe impl Sync for KvmfrInputSink {}
+
+impl KvmfrInputSink {
+    fn new(cursor_queue: *mut ffi::LGMPClientQueue) -> Self {
+        KvmfrInputSink { cursor_queue }
+    }
+
+    fn send_cursor_msg(&self, msg: &ffi::CursorChannelMessage) {
+        let ptr = msg as *const ffi::CursorChannelMessage as *const u8;
+        let size = std::mem::size_of::<ffi::CursorChannelMessage>() as u32;
+        unsafe {
+            ffi::lgmpClientSendData(self.cursor_queue, ptr, size, ptr::null_mut());
+        }
+    }
+}
+
+impl InputSink for KvmfrInputSink {
+    fn handle_pointer(&mut self, kind: PointerEventKind, u: f64, v: f64) {
+        let msg = match kind {
+            PointerEventKind::Down | PointerEventKind::Up | PointerEventKind::Motion => {
+                // u,v are [0,1] normalized. Convert to fixed-point or use as-is.
+                // The guest framebuffer size is negotiated through LGMP.
+                // For now, send normalized coordinates as u32.
+                // type 0 = move, 1 = button
+                let msg_type = match kind {
+                    PointerEventKind::Motion => 0u32,
+                    PointerEventKind::Down => 1u32,
+                    PointerEventKind::Up => 1u32,
+                    _ => 0u32,
+                };
+                let x = (u * u32::MAX as f64) as u32;
+                let y = (v * u32::MAX as f64) as u32;
+                let buttons = match kind {
+                    PointerEventKind::Down => 1u32,
+                    _ => 0u32,
+                };
+                ffi::CursorChannelMessage { msg_type, x, y, buttons }
+            }
+            PointerEventKind::Scroll(_, _) => return, // not yet handled
+        };
+        self.send_cursor_msg(&msg);
+    }
+}
+
 // ── KVMFR Frame Producer ──────────────────────────────────────────────
 
 pub struct KvmfrFrameProducer {
     state: ProducerState,
     frame_count: u64,
     _region: Option<MappedRegion>,
+    pub cursor_queue: Option<*mut ffi::LGMPClientQueue>,
 }
 
 enum ProducerState {
@@ -177,7 +247,12 @@ enum ProducerState {
 
 impl KvmfrFrameProducer {
     pub fn new() -> Self {
-        KvmfrFrameProducer { state: ProducerState::Uninitialized, frame_count: 0, _region: None }
+        KvmfrFrameProducer {
+            state: ProducerState::Uninitialized,
+            frame_count: 0,
+            _region: None,
+            cursor_queue: None,
+        }
     }
 
     /// Try transports in priority order, then init LGMP on the first that works.
@@ -222,6 +297,15 @@ impl KvmfrFrameProducer {
             return None;
         }
         info!("LGMP frame queue subscribed");
+
+        // Subscribe to cursor queue for input
+        let mut cursor_queue: *mut ffi::LGMPClientQueue = ptr::null_mut();
+        if unsafe { ffi::lgmpClientSubscribe(client, ffi::LGMP_Q_CURSOR, &mut cursor_queue) } == 0 && !cursor_queue.is_null() {
+            info!("LGMP cursor queue subscribed");
+            self.cursor_queue = Some(cursor_queue);
+        } else {
+            info!("LGMP cursor queue not available (input disabled)");
+        }
 
         // Keep the mapping alive
         self._region = Some(MappedRegion { mapping });
@@ -308,6 +392,22 @@ impl FrameProducer for KvmfrFrameProducer {
 
     fn size(&self) -> (u32, u32) {
         match &self.state { ProducerState::Simulated { width, height, .. } => (*width, *height), _ => (0, 0) }
+    }
+
+    fn create_input_sink(&mut self) -> Option<Box<dyn InputSink>> {
+        if let Some(q) = self.cursor_queue {
+            Some(Box::new(KvmfrInputSink::new(q)) as Box<dyn InputSink>)
+        } else {
+            // In simulated mode (no LGMP), provide a no-op sink for testing
+            #[derive(Debug)]
+            struct LogInputSink;
+            impl InputSink for LogInputSink {
+                fn handle_pointer(&mut self, kind: PointerEventKind, u: f64, v: f64) {
+                    info!(?kind, u, v, "kvmfr input (simulated)");
+                }
+            }
+            Some(Box::new(LogInputSink))
+        }
     }
 }
 

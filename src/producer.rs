@@ -3,6 +3,8 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::ImportMem;
 
+use crate::input_router::InputSink;
+
 /// Result of a frame update.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameResult {
@@ -35,6 +37,9 @@ pub trait FrameProducer {
     fn texture(&self) -> &GlesTexture;
     /// Get the current dimensions.
     fn size(&self) -> (u32, u32);
+    /// Optionally create an InputSink for this producer's content.
+    /// Returns None if the producer doesn't support input routing.
+    fn create_input_sink(&mut self) -> Option<Box<dyn InputSink>> { None }
 }
 
 /// An animated checkerboard that deliberately tests edge cases.
