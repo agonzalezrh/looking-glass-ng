@@ -36,6 +36,7 @@ use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::shm::ShmHandler;
 use smithay::wayland::shm::ShmState;
 use crate::input::Camera;
+use crate::perf::PerfStats;
 use crate::producer::{FrameProducer, FrameResult};
 use crate::scene::{Scene, Visual, VisualContent, VisualId};
 use crate::renderer;
@@ -126,6 +127,7 @@ pub struct LookingGlass {
     pub spatial_mode: bool,
     /// Registered frame producers (e.g. animated textures, Looking Glass)
     producers: Vec<(VisualId, Box<dyn FrameProducer>)>,
+    pub perf: PerfStats,
 }
 
 impl LookingGlass {
@@ -150,6 +152,7 @@ impl LookingGlass {
             camera: Camera::new(),
             spatial_mode: false,
             producers: Vec::new(),
+            perf: PerfStats::new(),
         }
     }
 
@@ -306,6 +309,9 @@ impl LookingGlass {
     }
 
     pub fn render(&mut self) {
+        self.perf.begin_frame();
+        let t_updates = std::time::Instant::now();
+
         // Step 1: Update frame producers
         let mut removed = Vec::new();
         let mut updates: Vec<(VisualId, GlesTexture)> = Vec::new();
@@ -316,20 +322,26 @@ impl LookingGlass {
             };
             let renderer = backend.renderer();
             let mut i = 0;
+            let mut had_update = false;
             while i < self.producers.len() {
                 let (vid, producer) = &mut self.producers[i];
+                let t0 = std::time::Instant::now();
                 let result = producer.update(renderer);
                 match result {
                     FrameResult::Updated => {
+                        had_update = true;
+                        self.perf.record_texture(t0.elapsed().as_nanos() as u64);
                         updates.push((*vid, producer.texture().clone()));
                         i += 1;
                     }
                     FrameResult::Unchanged => {
+                        self.perf.record_dropped();
                         i += 1;
                     }
                     FrameResult::Resized(_w, _h) => {
+                        had_update = true;
+                        self.perf.record_texture(t0.elapsed().as_nanos() as u64);
                         updates.push((*vid, producer.texture().clone()));
-                        // Visual geometry update happens below
                         i += 1;
                     }
                     FrameResult::Error(msg) => {
@@ -343,8 +355,9 @@ impl LookingGlass {
                     }
                 }
             }
+            let _ = had_update;
         }
-        // Apply texture updates to Visuals
+        // Apply texture updates
         for (vid, tex) in &updates {
             if let Some(visual) = self.scene.get_mut(*vid) {
                 if let Some(dst) = visual.texture_mut() {
@@ -352,20 +365,14 @@ impl LookingGlass {
                 }
             }
         }
-        // Remove finished producers' visuals from scene
         for vid in &removed {
             self.scene.remove(*vid);
         }
 
-        let Some(backend) = self.backend.as_mut() else {
-            return;
-        };
+        let Some(backend) = self.backend.as_mut() else { return; };
         if self.spatial_mode {
-            // Spatial mode: camera back for overview
             self.camera.speed = 30.0;
-            // Camera stays where user navigated it
         } else {
-            // Normal mode: snap camera close and center for 2D view
             self.camera.speed = 5.0;
             self.camera.position = cgmath::Point3::new(0.0, 0.0, 500.0);
             self.camera.yaw = 0.0;
@@ -377,10 +384,11 @@ impl LookingGlass {
         } else {
             cgmath::ortho(-640.0, 640.0, -360.0, 360.0, -1000.0, 1000.0)
         };
-        if let Err(SwapBuffersError::ContextLost(e)) = renderer::render_scene(backend, &self.scene, &view, &proj) {
+        if let Err(SwapBuffersError::ContextLost(e)) = renderer::render_scene(backend, &self.scene, &view, &proj, &mut self.perf) {
             error!(?e, "Context lost");
             self.backend = None;
         }
+        self.perf.record_frame();
     }
 }
 

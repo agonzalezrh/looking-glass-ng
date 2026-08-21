@@ -7,6 +7,7 @@ use smithay::backend::renderer::Texture;
 use smithay::backend::SwapBuffersError;
 use tracing::error;
 
+use crate::perf::PerfStats;
 use crate::scene::Scene;
 
 const QUAD_VS: &str = "\
@@ -189,12 +190,16 @@ pub fn render_scene(
     scene: &Scene,
     view: &Matrix4<f32>,
     proj: &Matrix4<f32>,
+    perf: &mut PerfStats,
 ) -> Result<(), SwapBuffersError> {
     let window_size = backend.window_size();
     let w = window_size.w as f32;
     let h = window_size.h as f32;
 
+    let t_bind = std::time::Instant::now();
     let r = do_render(backend, scene, view, proj, window_size, w, h);
+    perf.record_bind(t_bind.elapsed().as_nanos() as u64);
+
     if let Err(SwapBuffersError::ContextLost(e)) = r {
         error!(?e, "Context lost");
     }

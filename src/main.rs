@@ -3,6 +3,7 @@ mod compositor;
 mod config;
 mod input;
 mod kvmfr;
+mod perf;
 mod producer;
 mod renderer;
 mod scene;
@@ -90,7 +91,17 @@ fn main() {
         )
         .expect("Failed to init wayland server source");
 
-    // Winit event source + rendering
+    // Periodic render timer (~60 fps)
+    use smithay::reexports::calloop::timer::{Timer, TimeoutAction};
+    let render_timer = Timer::from_duration(std::time::Duration::from_millis(16));
+    handle
+        .insert_source(render_timer, |_, _, state| {
+            state.render();
+            TimeoutAction::ToDuration(std::time::Duration::from_millis(16))
+        })
+        .expect("Failed to register render timer");
+
+    // Winit event source
     handle
         .insert_source(winit_source, |event, _, state| match event {
             WinitEvent::Resized { size, .. } => {
