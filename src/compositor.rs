@@ -380,7 +380,6 @@ impl LookingGlass {
         self.perf.begin_frame();
 
         // Step 1: Update frame producers (measure each)
-        let mut removed = Vec::new();
         let mut updates: Vec<(VisualId, GlesTexture)> = Vec::new();
         {
             let backend = match self.backend.as_mut() {
@@ -405,7 +404,16 @@ impl LookingGlass {
                         self.perf.record_dropped();
                         i += 1;
                     }
-                    FrameResult::Resized(_w, _h) => {
+                    FrameResult::Resized(w, h) => {
+                        // Update visual geometry to match new framebuffer size.
+                        // The transform.scale is NOT modified — it's the user's spatial scale.
+                        if let Some(visual) = self.scene.get_mut(*vid) {
+                            visual.geometry = smithay::utils::Rectangle::new(
+                                smithay::utils::Point::new(0, 0),
+                                smithay::utils::Size::new(w as i32, h as i32),
+                            );
+                            info!(?vid, new_w = w, new_h = h, "visual resized");
+                        }
                         self.perf.record_stage(PipelineStage::ProducerUpdate, dt);
                         updates.push((*vid, producer.texture().clone()));
                         i += 1;
@@ -434,14 +442,7 @@ impl LookingGlass {
         }
         self.perf.record_stage(PipelineStage::TexCopy, t_tex_start.elapsed().as_nanos() as u64);
 
-        // Step 3: Remove finished Visuals
-        let t_rem_start = std::time::Instant::now();
-        for vid in &removed {
-            self.scene.remove(*vid);
-        }
-        self.perf.record_stage(PipelineStage::Remove, t_rem_start.elapsed().as_nanos() as u64);
-
-        // Step 3.5: Apply layout
+        // Step 3: Apply layout
         let (w, h) = self.window_size;
         let world_w = w;
         let world_h = h;

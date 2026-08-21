@@ -399,4 +399,92 @@ mod tests {
         sink2.clear();
         assert_eq!(sink2.keys.len(), 0);
     }
+
+    // ── Resize tests (UV/pixel chain) ──────────────────────────────────
+
+    #[test]
+    fn uv_same_after_resize() {
+        let transform = Transform3D::identity();
+        let proj = cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0);
+        let view = Matrix4::look_at_rh(cgmath::Point3::new(0.0, 0.0, 500.0), cgmath::Point3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0));
+        let pv = proj * view;
+        // Same click in space, same UV regardless of framebuffer resolution
+        let uv_small = screen_to_visual_uv(&pv, 0.0, 0.0, &transform, 200.0, 100.0);
+        let uv_big = screen_to_visual_uv(&pv, 0.0, 0.0, &transform, 400.0, 200.0);
+        assert!(uv_small.is_some() && uv_big.is_some());
+        assert_eq!(uv_small.unwrap(), uv_big.unwrap(), "UV unchanged by resize");
+    }
+
+    #[test]
+    fn pixel_differs_after_resize() {
+        // Same UV → different pixel coords for different resolutions
+        let (px_sm, py_sm) = uv_to_pixels(0.5, 0.5, 1920, 1080);
+        let (px_bg, py_bg) = uv_to_pixels(0.5, 0.5, 2560, 1440);
+        assert_eq!(px_sm, 960);
+        assert_eq!(py_sm, 540);
+        assert_eq!(px_bg, 1280);
+        assert_eq!(py_bg, 720);
+    }
+
+    #[test]
+    fn resize_changes_pick_geometry() {
+        // The picking function uses geometry size (gw, gh).
+        // When geometry changes (resize), the quad size changes,
+        // which changes what spatial area the visual occupies.
+        let view = Matrix4::look_at_rh(
+            cgmath::Point3::new(0.0, 0.0, 500.0),
+            cgmath::Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        );
+        let proj = cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0);
+        let pv = proj * view;
+        let transform = Transform3D::identity();
+        // NDC (-0.9, 0.5) is outside 200x100 quad (NDC bounds [-0.312,0.312])
+        let uv_small = screen_to_visual_uv(&pv, -0.9, 0.5, &transform, 200.0, 100.0);
+        assert!(uv_small.is_none(), "should miss small quad");
+        // Same NDC with larger quad (800x400, NDC bounds [-1.25,0.833]) — now hits
+        let uv_big = screen_to_visual_uv(&pv, -0.9, 0.5, &transform, 800.0, 400.0);
+        assert!(uv_big.is_some(), "should hit resized larger quad");
+    }
+
+    #[test]
+    fn resize_both_ends() {
+        // Verify that going 1920→2560 and 2560→1920 both work
+        let (px1, py1) = uv_to_pixels(0.5, 0.5, 1920, 1080);
+        let (px2, py2) = uv_to_pixels(0.5, 0.5, 2560, 1440);
+        let (px3, py3) = uv_to_pixels(0.5, 0.5, 1920, 1080);
+        assert_eq!(px1, px3);
+        assert_eq!(py1, py3);
+
+        // Transform preserved — UV at center always (0.5, 0.5)
+        let transform = Transform3D::identity();
+        let proj = cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0);
+        let view = Matrix4::look_at_rh(cgmath::Point3::new(0.0, 0.0, 500.0), cgmath::Point3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0));
+        let pv = proj * view;
+        let uv1 = screen_to_visual_uv(&pv, 0.0, 0.0, &transform, 200.0, 100.0);
+        let uv2 = screen_to_visual_uv(&pv, 0.0, 0.0, &transform, 400.0, 200.0);
+        assert_eq!(uv1, uv2, "center UV unchanged by resize");
+    }
+
+    #[test]
+    fn aspect_change_uv() {
+        // 16:9 → 16:10 aspect ratio change
+        // UV coordinate should still be [0,1] normalized correctly
+        let (u, v) = screen_to_visual_uv(
+            &(cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0) *
+              Matrix4::look_at_rh(cgmath::Point3::new(0.0, 0.0, 500.0), cgmath::Point3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0))),
+            0.0, 0.0, &Transform3D::identity(),
+            1920.0, 1080.0,
+        ).unwrap();
+        assert!((u - 0.5).abs() < 1e-4);
+        assert!((v - 0.5).abs() < 1e-4);
+        let (u2, v2) = screen_to_visual_uv(
+            &(cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0) *
+              Matrix4::look_at_rh(cgmath::Point3::new(0.0, 0.0, 500.0), cgmath::Point3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0))),
+            0.0, 0.0, &Transform3D::identity(),
+            1920.0, 1200.0,
+        ).unwrap();
+        assert!((u2 - 0.5).abs() < 1e-4);
+        assert!((v2 - 0.5).abs() < 1e-4);
+    }
 }
