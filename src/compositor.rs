@@ -145,6 +145,7 @@ pub struct LookingGlass {
     pub last_dx: f64,
     pub last_dy: f64,
     pub nav_button: u32,
+    pub auto_orbit: bool,
     pub interaction: InteractionController,
     input_sinks: HashMap<VisualId, Box<dyn InputSink>>,
     /// Track Wayland WlSurface per VisualId for direct seat input.
@@ -186,7 +187,7 @@ impl LookingGlass {
             toplevels: Vec::new(),
             scene: Scene::default(),
             camera: Camera::new(),
-            spatial_mode: false,
+            spatial_mode: true,
             layout_mode: layout::LayoutMode::Freeform,
             workspaces: vec![Workspace::new(), Workspace::new(), Workspace::new()],
             active_workspace: 0,
@@ -197,6 +198,7 @@ impl LookingGlass {
             last_dx: 0.0,
             last_dy: 0.0,
             nav_button: 0,
+            auto_orbit: true,
             interaction: InteractionController::new(),
             input_sinks: HashMap::new(),
             wayland_surfaces: HashMap::new(),
@@ -496,6 +498,11 @@ impl LookingGlass {
             self.camera.position = cgmath::Point3::new(0.0, 0.0, 500.0);
             self.camera.yaw = 0.0;
             self.camera.pitch = 0.0;
+        } else if self.auto_orbit {
+            // Auto-orbit: disabled on any mouse/keyboard interaction
+            let t = (self.perf.frame_count as f32) * 0.003;
+            self.camera.yaw = t.cos() * 0.8;
+            self.camera.pitch = (t * 0.5).sin() * 0.3 + 0.2;
         }
         let (w, h) = self.window_size;
         let view = self.camera.view_matrix();
@@ -674,10 +681,12 @@ impl LookingGlass {
         self.last_mouse = (x, y);
         // Navigation buttons (right=mouse 3, middle=mouse 2)
         if self.nav_button == 3 {
+            self.auto_orbit = false;
             self.handle_orbit(dx, dy);
             return;
         }
         if self.nav_button == 2 {
+            self.auto_orbit = false;
             self.handle_pan(dx, dy);
             return;
         }
@@ -814,8 +823,12 @@ impl LookingGlass {
     /// Routes to the focused visual's InputSink.
     /// Tab key (23) is always consumed by the compositor for spatial mode toggle.
     pub fn handle_key(&mut self, linux_key: u32, pressed: bool) {
+        if pressed {
+            self.auto_orbit = false;
+        }
+        tracing::info!(?linux_key, pressed, "KEY EVENT received");
+
         // Camera keyboard controls only when no visual has focus
-        // (otherwise keys would be sent to both the camera AND the focused visual)
         if self.scene.focused_id.is_none() {
             self.camera.handle_key(linux_key, pressed, 1.0);
         }
@@ -828,10 +841,11 @@ impl LookingGlass {
                 69 => { self.switch_workspace(2); return; }
                 _ => {}
             }
-            // Tab — spatial mode toggle
-            if linux_key == 23 {
+            // Tab (23) or F5 (71) — spatial mode toggle
+            // F5 is used because TigerVNC intercepts Tab for internal focus switching
+            if linux_key == 23 || linux_key == 71 {
                 self.spatial_mode = !self.spatial_mode;
-                tracing::info!(spatial_mode = self.spatial_mode, "mode toggled");
+                tracing::info!(spatial_mode = self.spatial_mode, "mode toggled by key {}", linux_key);
                 return;
             }
             // F — frame selected visual
