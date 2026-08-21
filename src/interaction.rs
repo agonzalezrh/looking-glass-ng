@@ -167,6 +167,11 @@ impl InteractionController {
             let view_fwd = camera.view_matrix() * Vector4::new(0.0, 0.0, -1.0, 0.0);
             let plane_normal = Vector3::new(view_fwd.x, view_fwd.y, view_fwd.z).normalize();
 
+            // Mark as detached from layout when user starts manipulating
+            if !scene.detached_set.contains(&vid) {
+                scene.detached_set.push(vid);
+            }
+
             if let Some(hit) = Self::ray_plane_intersect(ray_origin, ray_dir, pos, plane_normal) {
                 self.active = Some(ActiveManip {
                     mode,

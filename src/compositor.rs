@@ -42,6 +42,7 @@ use cgmath::Matrix4;
 use crate::input::Camera;
 use crate::input_router::{self, InputSink, KeyboardEvent, PointerEventKind};
 use crate::interaction::InteractionController;
+use crate::layout;
 use crate::perf::PerfStats;
 use crate::producer::{FrameProducer, FrameResult};
 use crate::scene::{Scene, Visual, VisualContent, VisualId};
@@ -131,6 +132,7 @@ pub struct LookingGlass {
     pub scene: Scene,
     pub camera: Camera,
     pub spatial_mode: bool,
+    pub layout_mode: layout::LayoutMode,
     /// Registered frame producers (e.g. animated textures, Looking Glass)
     producers: Vec<(VisualId, Box<dyn FrameProducer>)>,
     pub perf: PerfStats,
@@ -161,6 +163,7 @@ impl LookingGlass {
             scene: Scene::default(),
             camera: Camera::new(),
             spatial_mode: false,
+            layout_mode: layout::LayoutMode::Freeform,
             producers: Vec::new(),
             perf: PerfStats::new(),
             window_size: (1280.0, 720.0),
@@ -438,6 +441,20 @@ impl LookingGlass {
         }
         self.perf.record_stage(PipelineStage::Remove, t_rem_start.elapsed().as_nanos() as u64);
 
+        // Step 3.5: Apply layout
+        let (w, h) = self.window_size;
+        let world_w = w;
+        let world_h = h;
+        let detached = self.scene.detached_set.clone();
+        layout::apply_layout(
+            &mut self.scene,
+            self.layout_mode,
+            &layout::LayoutConfig::default(),
+            &detached,
+            world_w,
+            world_h,
+        );
+
         // Step 4: Camera + render
         let Some(backend) = self.backend.as_mut() else { return; };
         if !self.spatial_mode {
@@ -548,6 +565,20 @@ impl LookingGlass {
         self.last_mouse = (x, y);
         self.interaction.window_size = self.window_size;
         self.interaction.handle_pointer_move(x, y, &mut self.scene, &self.camera, self.spatial_mode);
+    }
+
+    /// Center the camera on the currently selected visual.
+    /// Returns true if a visual was framed.
+    pub fn frame_selected(&mut self) -> bool {
+        let Some(vid) = self.scene.selected_id else { return false };
+        let (w, h) = self.window_size;
+        if let Some(pos) = layout::frame_visual(vid, &self.scene, w, h) {
+            self.camera.position = cgmath::Point3::new(pos.x, pos.y, pos.z);
+            info!(?vid, ?pos, "camera framed on visual");
+            true
+        } else {
+            false
+        }
     }
 
     /// Public entry point for keyboard events.

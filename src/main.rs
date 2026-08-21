@@ -5,6 +5,7 @@ mod input;
 mod input_router;
 mod interaction;
 mod kvmfr;
+mod layout;
 mod perf;
 mod producer;
 mod renderer;

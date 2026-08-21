@@ -10,7 +10,7 @@ use smithay::backend::renderer::gles::GlesTexture;
 use smithay::utils::Rectangle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VisualId(u64);
+pub struct VisualId(pub u64);
 
 impl VisualId {
     fn next() -> Self {
@@ -102,6 +102,7 @@ pub struct Scene {
     pub selected_id: Option<VisualId>,
     pub focused_id: Option<VisualId>,
     pub hovered_id: Option<VisualId>,
+    pub detached_set: Vec<VisualId>,
 }
 
 impl Scene {
@@ -120,6 +121,7 @@ impl Scene {
         if self.hovered_id == Some(id) {
             self.hovered_id = None;
         }
+        self.detached_set.retain(|v| *v != id);
     }
 
     pub fn get_mut(&mut self, id: VisualId) -> Option<&mut Visual> {
