@@ -192,13 +192,61 @@ pub fn render_scene(
     proj: &Matrix4<f32>,
     perf: &mut PerfStats,
 ) -> Result<(), SwapBuffersError> {
+    use crate::perf::PipelineStage;
+
     let window_size = backend.window_size();
     let w = window_size.w as f32;
     let h = window_size.h as f32;
 
     let t_bind = std::time::Instant::now();
-    let r = do_render(backend, scene, view, proj, window_size, w, h);
-    perf.record_bind(t_bind.elapsed().as_nanos() as u64);
+    let (renderer, mut target) = match backend.bind() {
+        Ok(pair) => pair,
+        Err(e) => { error!(?e, "bind failed"); return Ok(()); }
+    };
+    let mut frame = match renderer.render(&mut target, window_size, smithay::utils::Transform::Normal) {
+        Ok(f) => f,
+        Err(_) => return Ok(()),
+    };
+    perf.record_stage(PipelineStage::RenderBind, t_bind.elapsed().as_nanos() as u64);
+
+    let draw = match frame.with_context(|gl| DrawGl::new(gl)) {
+        Ok(d) => d,
+        Err(e) => { error!(?e, "GL init failed"); return Ok(()); }
+    };
+
+    let _ = frame.with_context(|gl| unsafe {
+        gl.ClearColor(0.15, 0.15, 0.15, 1.0);
+        gl.Clear(ffi::COLOR_BUFFER_BIT | ffi::DEPTH_BUFFER_BIT);
+    });
+    let _ = frame.with_context(|gl| unsafe {
+        gl.Enable(ffi::BLEND);
+        gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
+        gl.Enable(ffi::DEPTH_TEST);
+        gl.DepthFunc(ffi::LESS);
+    });
+
+    // Draw all visuals
+    let t_draw = std::time::Instant::now();
+    for visual in scene.iter() {
+        let Some(texture) = visual.texture() else { continue };
+        let tex_id = texture.tex_id();
+        let gw = texture.size().w as f32;
+        let gh = texture.size().h as f32;
+        let pos = visual.transform.position;
+        let model = Matrix4::from_translation(pos)
+            * Matrix4::from(visual.transform.rotation)
+            * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
+        let mvp = proj * view * model;
+        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id));
+    }
+    perf.record_stage(PipelineStage::RenderDraw, t_draw.elapsed().as_nanos() as u64);
+
+    drop(frame);
+    drop(target);
+
+    let t_submit = std::time::Instant::now();
+    let r = backend.submit(None);
+    perf.record_stage(PipelineStage::RenderSubmit, t_submit.elapsed().as_nanos() as u64);
 
     if let Err(SwapBuffersError::ContextLost(e)) = r {
         error!(?e, "Context lost");

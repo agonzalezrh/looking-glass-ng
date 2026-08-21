@@ -309,10 +309,11 @@ impl LookingGlass {
     }
 
     pub fn render(&mut self) {
+        use crate::perf::PipelineStage;
+        let t_frame = std::time::Instant::now();
         self.perf.begin_frame();
-        let t_updates = std::time::Instant::now();
 
-        // Step 1: Update frame producers
+        // Step 1: Update frame producers (measure each)
         let mut removed = Vec::new();
         let mut updates: Vec<(VisualId, GlesTexture)> = Vec::new();
         {
@@ -322,25 +323,24 @@ impl LookingGlass {
             };
             let renderer = backend.renderer();
             let mut i = 0;
-            let mut had_update = false;
             while i < self.producers.len() {
                 let (vid, producer) = &mut self.producers[i];
                 let t0 = std::time::Instant::now();
                 let result = producer.update(renderer);
+                let dt = t0.elapsed().as_nanos() as u64;
                 match result {
                     FrameResult::Updated => {
-                        had_update = true;
-                        self.perf.record_texture(t0.elapsed().as_nanos() as u64);
+                        self.perf.record_stage(PipelineStage::ProducerUpdate, dt);
                         updates.push((*vid, producer.texture().clone()));
                         i += 1;
                     }
                     FrameResult::Unchanged => {
+                        self.perf.record_stage(PipelineStage::ProducerUpdate, dt);
                         self.perf.record_dropped();
                         i += 1;
                     }
                     FrameResult::Resized(_w, _h) => {
-                        had_update = true;
-                        self.perf.record_texture(t0.elapsed().as_nanos() as u64);
+                        self.perf.record_stage(PipelineStage::ProducerUpdate, dt);
                         updates.push((*vid, producer.texture().clone()));
                         i += 1;
                     }
@@ -349,15 +349,16 @@ impl LookingGlass {
                         i += 1;
                     }
                     FrameResult::Finished => {
-                        info!(?vid, "producer finished, removing");
+                        info!(?vid, "producer finished");
                         removed.push(*vid);
                         self.producers.swap_remove(i);
                     }
                 }
             }
-            let _ = had_update;
         }
-        // Apply texture updates
+
+        // Step 2: Copy updated textures to Visuals
+        let t_tex_start = std::time::Instant::now();
         for (vid, tex) in &updates {
             if let Some(visual) = self.scene.get_mut(*vid) {
                 if let Some(dst) = visual.texture_mut() {
@@ -365,15 +366,18 @@ impl LookingGlass {
                 }
             }
         }
+        self.perf.record_stage(PipelineStage::TexCopy, t_tex_start.elapsed().as_nanos() as u64);
+
+        // Step 3: Remove finished Visuals
+        let t_rem_start = std::time::Instant::now();
         for vid in &removed {
             self.scene.remove(*vid);
         }
+        self.perf.record_stage(PipelineStage::Remove, t_rem_start.elapsed().as_nanos() as u64);
 
+        // Step 4: Camera + render
         let Some(backend) = self.backend.as_mut() else { return; };
-        if self.spatial_mode {
-            self.camera.speed = 30.0;
-        } else {
-            self.camera.speed = 5.0;
+        if !self.spatial_mode {
             self.camera.position = cgmath::Point3::new(0.0, 0.0, 500.0);
             self.camera.yaw = 0.0;
             self.camera.pitch = 0.0;
@@ -388,6 +392,8 @@ impl LookingGlass {
             error!(?e, "Context lost");
             self.backend = None;
         }
+
+        self.perf.record_stage(PipelineStage::Total, t_frame.elapsed().as_nanos() as u64);
         self.perf.record_frame();
     }
 }

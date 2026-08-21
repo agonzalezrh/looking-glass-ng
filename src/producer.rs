@@ -122,19 +122,26 @@ impl FrameProducer for HostileCheckerboard {
             }
         }
 
-        // Normal update every 3 frames
+        // Every 3 frames: update texture in-place using glTexSubImage2D
+        // to avoid full texture creation cost (alloc + upload vs just upload).
         if self.frame_count % 3 != 0 {
             return FrameResult::Unchanged;
         }
         let pixels = Self::generate(self.width, self.height, self.frame_count / 3);
-        if let Ok(tex) = renderer.import_memory(
-            &pixels, Fourcc::Abgr8888, (self.width as i32, self.height as i32).into(), false,
-        ) {
-            self.texture = tex;
-            FrameResult::Updated
-        } else {
-            FrameResult::Error("GPU import failed".into())
-        }
+        let w = self.width as i32;
+        let h = self.height as i32;
+        let tex_id = self.texture.tex_id();
+        let _ = renderer.with_context(|gl| unsafe {
+            gl.BindTexture(smithay::backend::renderer::gles::ffi::TEXTURE_2D, tex_id);
+            gl.TexSubImage2D(
+                smithay::backend::renderer::gles::ffi::TEXTURE_2D,
+                0, 0, 0, w, h,
+                smithay::backend::renderer::gles::ffi::BGRA_EXT,
+                smithay::backend::renderer::gles::ffi::UNSIGNED_BYTE,
+                pixels.as_ptr() as *const std::ffi::c_void,
+            );
+        });
+        FrameResult::Updated
     }
 
     fn texture(&self) -> &GlesTexture {
