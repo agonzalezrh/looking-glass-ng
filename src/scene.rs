@@ -9,6 +9,23 @@ use cgmath::Vector4;
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::utils::Rectangle;
 
+/// The state of a visual's content producer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ContentState {
+    /// No producer connected; visual shows placeholder content.
+    Disconnected,
+    /// Producer is connecting (initial frames may still arrive).
+    Connecting,
+    /// Producer is active and providing frames.
+    Ready,
+    /// Producer encountered an error but may recover.
+    Error,
+}
+
+impl Default for ContentState {
+    fn default() -> Self { ContentState::Disconnected }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VisualId(pub u64);
 
@@ -69,6 +86,7 @@ pub struct Visual {
     pub transform: Transform3D,
     pub selected: bool,
     pub focused: bool,
+    pub content_state: ContentState,
 }
 
 impl Visual {
@@ -80,7 +98,13 @@ impl Visual {
             transform: Transform3D::identity(),
             selected: false,
             focused: false,
+            content_state: ContentState::Ready,
         }
+    }
+
+    /// Returns true if the visual has active content (not disconnected/error).
+    pub fn has_active_content(&self) -> bool {
+        matches!(self.content_state, ContentState::Ready | ContentState::Connecting)
     }
 
     pub fn texture(&self) -> Option<&GlesTexture> {
@@ -122,6 +146,27 @@ impl Scene {
             self.hovered_id = None;
         }
         self.detached_set.retain(|v| *v != id);
+    }
+
+    /// Mark a visual as disconnected from its content producer.
+    /// The visual survives with its transform and state.
+    /// Clear focus (keyboard to disconnected guest makes no sense),
+    /// but preserve selection (spatial position is still meaningful).
+    pub fn disconnect(&mut self, id: VisualId) {
+        if let Some(v) = self.get_mut(id) {
+            v.content_state = ContentState::Disconnected;
+        }
+        if self.focused_id == Some(id) {
+            self.focused_id = None;
+            if let Some(v) = self.get_mut(id) {
+                v.focused = false;
+            }
+        }
+    }
+
+    /// Check if a visual has active content.
+    pub fn is_active(&self, id: VisualId) -> bool {
+        self.visuals.iter().any(|v| v.id == id && v.has_active_content())
     }
 
     pub fn get_mut(&mut self, id: VisualId) -> Option<&mut Visual> {
@@ -618,6 +663,59 @@ mod tests {
         assert!(!scene.raise(VisualId(999)));
         assert!(!scene.lower(VisualId(999)));
         assert!(!scene.reset_transform(VisualId(999)));
+    }
+
+    // ── Lifecycle / disconnect tests ─────────────────────────────────
+
+    #[test]
+    fn disconnect_clears_focus_not_selection() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(1)));
+        scene.select(Some(VisualId(1)));
+        scene.disconnect(VisualId(1));
+        assert_eq!(scene.focused_id, None, "focus cleared on disconnect");
+        assert_eq!(scene.selected_id, Some(VisualId(1)), "selection preserved on disconnect");
+    }
+
+    #[test]
+    fn disconnect_other_visual_leaves_focus() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(1)));
+        scene.disconnect(VisualId(2));
+        assert_eq!(scene.focused_id, Some(VisualId(1)), "focus unchanged when other visual disconnects");
+    }
+
+    #[test]
+    fn is_active_disconnected() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(1)));
+        scene.disconnect(VisualId(1));
+        assert!(!scene.is_active(VisualId(1)), "disconnected visual is not active");
+    }
+
+    #[test]
+    fn is_active_unknown_visual() {
+        let scene = Scene::default();
+        assert!(!scene.is_active(VisualId(999)), "unknown visual is not active");
+    }
+
+    #[test]
+    fn disconnect_idempotent() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(1)));
+        scene.disconnect(VisualId(1));
+        scene.disconnect(VisualId(1)); // second disconnect should not crash
+        assert_eq!(scene.focused_id, None);
+        assert!(!scene.is_active(VisualId(1)));
+    }
+
+    #[test]
+    fn multiple_disconnects_one_active() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(1)));
+        scene.focus(Some(VisualId(2)));
+        scene.disconnect(VisualId(1));
+        assert_eq!(scene.focused_id, Some(VisualId(2)), "second visual retains focus");
     }
 
     #[test]

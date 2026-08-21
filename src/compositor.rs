@@ -415,8 +415,8 @@ impl LookingGlass {
                         i += 1;
                     }
                     FrameResult::Finished => {
-                        info!(?vid, "producer finished");
-                        removed.push(*vid);
+                        info!(?vid, "producer finished, disconnecting visual");
+                        self.scene.disconnect(*vid);
                         self.producers.swap_remove(i);
                     }
                 }
@@ -493,6 +493,7 @@ impl LookingGlass {
     /// Focus follows click: sets focused visual to the selected one.
     fn route_to_content(&mut self, kind: PointerEventKind, x: f64, y: f64) {
         let Some(vid) = self.scene.selected_id else { return };
+        if !self.scene.is_active(vid) { return }
 
         // Focus follows click + bring to front
         if kind == PointerEventKind::Down {
@@ -524,6 +525,7 @@ impl LookingGlass {
     /// The offset is subtracted to get raw evdev codes for HID mapping.
     fn route_keyboard(&mut self, key: u32, pressed: bool) {
         let Some(vid) = self.scene.focused_id else { return };
+        if !self.scene.is_active(vid) { return }
         let Some(sink) = self.input_sinks.get_mut(&vid) else { return };
         // Winit on X11 adds 8 to the evdev scancode. Detect and adjust.
         let evdev = if key > 8 { key - 8 } else { key };
