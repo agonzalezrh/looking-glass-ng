@@ -1,5 +1,6 @@
 use cgmath::Deg;
 use cgmath::InnerSpace;
+use cgmath::Matrix3;
 use cgmath::Matrix4;
 use cgmath::Quaternion;
 use cgmath::Rotation3;
@@ -105,6 +106,31 @@ impl Transform3D {
         let r = Matrix4::from(self.rotation);
         let s = Matrix4::from_nonuniform_scale(self.scale.x, self.scale.y, self.scale.z);
         t * r * s
+    }
+
+    /// Decompose a 4x4 matrix into a Transform3D (position, rotation, scale).
+    /// The matrix is assumed to be T * R * S (no shear/perspective).
+    pub fn from_matrix(m: &Matrix4<f32>) -> Self {
+        let position = Vector3::new(m[3][0], m[3][1], m[3][2]);
+        // Extract scale from column magnitudes
+        let sx = Vector3::new(m[0][0], m[0][1], m[0][2]).magnitude();
+        let sy = Vector3::new(m[1][0], m[1][1], m[1][2]).magnitude();
+        let sz = Vector3::new(m[2][0], m[2][1], m[2][2]).magnitude();
+        // Remove scale from columns to get pure rotation matrix
+        let col0 = Vector3::new(m[0][0] / sx, m[0][1] / sx, m[0][2] / sx);
+        let col1 = Vector3::new(m[1][0] / sy, m[1][1] / sy, m[1][2] / sy);
+        let col2 = Vector3::new(m[2][0] / sz, m[2][1] / sz, m[2][2] / sz);
+        let m3 = Matrix3::new(
+            col0.x, col0.y, col0.z,
+            col1.x, col1.y, col1.z,
+            col2.x, col2.y, col2.z,
+        );
+        let rotation = Quaternion::from(m3);
+        Transform3D {
+            position,
+            rotation,
+            scale: Vector3::new(sx.max(0.001), sy.max(0.001), sz.max(0.001)),
+        }
     }
 }
 
@@ -322,6 +348,69 @@ impl Scene {
             Some(v) => { v.parent = None; true }
             None => false,
         }
+    }
+
+    /// Detach a visual from its parent, preserving its world transform.
+    /// The visual's local transform is updated to match its current world
+    /// position/rotation/scale, and parent is cleared.
+    /// Returns true if the visual was found and had a parent.
+    pub fn detach_from_parent(&mut self, id: VisualId) -> bool {
+        let idx = match self.visuals.iter().position(|v| v.id == id) {
+            Some(i) => i,
+            None => return false,
+        };
+        if self.visuals[idx].parent.is_none() {
+            return true; // already detached
+        }
+        let world = self.world_matrix(id);
+        self.visuals[idx].transform = Transform3D::from_matrix(&world);
+        self.visuals[idx].parent = None;
+        true
+    }
+
+    /// Reparent a visual to a new parent, preserving its world transform.
+    /// The visual's local transform is recomputed relative to the new parent.
+    /// Returns an error if the reparenting would create a cycle.
+    pub fn reparent(&mut self, child: VisualId, new_parent: VisualId) -> Result<(), String> {
+        if child == new_parent {
+            return Err("cannot parent to self".into());
+        }
+        let idx = match self.visuals.iter().position(|v| v.id == child) {
+            Some(i) => i,
+            None => return Err("child not found".into()),
+        };
+        if !self.visuals.iter().any(|v| v.id == new_parent) {
+            return Err("parent not found".into());
+        }
+        // Compute child's current world transform
+        let child_world = self.world_matrix(child);
+        // Compute new parent's world transform
+        let parent_world = self.world_matrix(new_parent);
+        // Invert parent world: new_local = inverse(parent_world) * child_world
+        let inv_parent = match parent_world.invert() {
+            Some(m) => m,
+            None => return Err("parent transform not invertible".into()),
+        };
+        let new_local = inv_parent * child_world;
+        // Cycle detection: walk from new_parent upwards
+        let mut current = new_parent;
+        for _ in 0..32 {
+            if current == child {
+                return Err("cycle detected".into());
+            }
+            let visual = match self.visuals.iter().find(|v| v.id == current) {
+                Some(v) => v,
+                None => break,
+            };
+            match visual.parent {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+        // Apply new local transform and set parent
+        self.visuals[idx].transform = Transform3D::from_matrix(&new_local);
+        self.visuals[idx].parent = Some(new_parent);
+        Ok(())
     }
 
     /// Minimize a visual: hide it but preserve all state.
@@ -1091,6 +1180,62 @@ mod tests {
     fn parent_cycle_rejected() {
         let mut scene = Scene::default();
         assert!(scene.set_parent(VisualId(1), VisualId(2)).is_err());
+    }
+
+    // ── Detach / Reparent tests ──────────────────────────────────────
+
+    #[test]
+    fn detach_unknown_returns_false() {
+        let mut scene = Scene::default();
+        assert!(!scene.detach_from_parent(VisualId(999)));
+    }
+
+    #[test]
+    fn detach_noop_when_no_parent() {
+        let mut scene = Scene::default();
+        // Can't detach a nonexistent visual — returns false
+        assert!(!scene.detach_from_parent(VisualId(999)));
+    }
+
+    #[test]
+    fn reparent_self_rejected() {
+        let mut scene = Scene::default();
+        assert_eq!(scene.reparent(VisualId(1), VisualId(1)).unwrap_err(), "cannot parent to self");
+    }
+
+    #[test]
+    fn reparent_unknown_child() {
+        let mut scene = Scene::default();
+        assert_eq!(scene.reparent(VisualId(1), VisualId(2)).unwrap_err(), "child not found");
+    }
+
+    #[test]
+    fn reparent_unknown_parent() {
+        let mut scene = Scene::default();
+        assert_eq!(scene.reparent(VisualId(1), VisualId(2)).unwrap_err(), "child not found");
+    }
+
+    #[test]
+    fn detach_preserves_world_transform() {
+        // detach_from_parent should preserve the world transform
+        // (tested via the Transform3D decomposition math)
+        let m0 = Matrix4::from_translation(Vector3::new(100.0, 200.0, 300.0))
+            * Matrix4::from(Quaternion::from_angle_y(Deg(45.0)))
+            * Matrix4::from_nonuniform_scale(2.0, 3.0, 1.0);
+        let t = Transform3D::from_matrix(&m0);
+        // Decompose and recompose should give approximately same result
+        let m1 = t.to_matrix();
+        let t2 = Transform3D::from_matrix(&m1);
+        let m2 = t2.to_matrix();
+        for col in 0..4 {
+            for row in 0..4 {
+                let diff = (m1[col][row] - m2[col][row]).abs();
+                // f32 precision: allow up to 0.01 difference
+                assert!(diff < 0.01,
+                    "decompose mismatch at [{}][{}]: expected {}, got {}, diff {}",
+                    col, row, m1[col][row], m2[col][row], diff);
+            }
+        }
     }
 }
 
