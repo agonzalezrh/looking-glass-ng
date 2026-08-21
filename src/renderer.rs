@@ -25,6 +25,7 @@ const QUAD_FS: &str = "\
 precision mediump float;
 varying vec2 v_uv;
 uniform sampler2D u_tex;
+uniform float u_selected;
 void main() {
     vec2 uv = v_uv;
     float b = 0.05;
@@ -35,8 +36,11 @@ void main() {
         false
     );
     if (any(edge)) {
-        // BRIGHT CYAN border - makes the quad edges visible
-        gl_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
+        if (u_selected > 0.5) {
+            gl_FragColor = vec4(1.0, 0.84, 0.0, 1.0);
+        } else {
+            gl_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
+        }
     } else {
         gl_FragColor = texture2D(u_tex, uv);
     }
@@ -49,6 +53,7 @@ struct DrawGl {
     a_uv: u32,
     u_mvp: i32,
     u_tex: i32,
+    u_selected: i32,
     vbo: u32,
 }
 
@@ -68,6 +73,7 @@ impl DrawGl {
         let a_uv = unsafe { gl.GetAttribLocation(program, b"a_uv\0".as_ptr() as *const i8) as u32 };
         let u_mvp = unsafe { gl.GetUniformLocation(program, b"u_mvp\0".as_ptr() as *const i8) };
         let u_tex = unsafe { gl.GetUniformLocation(program, b"u_tex\0".as_ptr() as *const i8) };
+        let u_selected = unsafe { gl.GetUniformLocation(program, b"u_selected\0".as_ptr() as *const i8) };
         let mut vbo = 0;
         unsafe { gl.GenBuffers(1, &mut vbo) };
         let verts: [f32; 16] = [
@@ -81,7 +87,7 @@ impl DrawGl {
             gl.BufferData(ffi::ARRAY_BUFFER, std::mem::size_of_val(&verts) as isize,
                 verts.as_ptr() as *const std::ffi::c_void, ffi::STATIC_DRAW);
         }
-        DrawGl { program, a_pos, a_uv, u_mvp, u_tex, vbo }
+        DrawGl { program, a_pos, a_uv, u_mvp, u_tex, u_selected, vbo }
     }
 
     fn compile(gl: &ffi::Gles2, kind: u32, src: &str) -> u32 {
@@ -110,10 +116,12 @@ fn draw_textured_quad(
     draw: &DrawGl,
     mvp: &Matrix4<f32>,
     tex_id: u32,
+    selected: bool,
 ) {
     unsafe {
         gl.UseProgram(draw.program);
         gl.UniformMatrix4fv(draw.u_mvp, 1, 0, mvp.as_ptr());
+        gl.Uniform1f(draw.u_selected, if selected { 1.0 } else { 0.0 });
         gl.ActiveTexture(ffi::TEXTURE0);
         gl.BindTexture(ffi::TEXTURE_2D, tex_id);
         gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
@@ -177,7 +185,7 @@ fn do_render(
             * Matrix4::from(visual.transform.rotation)
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
         let mvp = proj * view * model;
-        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id));
+        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id, visual.selected));
     }
 
     drop(frame);
@@ -237,7 +245,7 @@ pub fn render_scene(
             * Matrix4::from(visual.transform.rotation)
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
         let mvp = proj * view * model;
-        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id));
+        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id, visual.selected));
     }
     perf.record_stage(PipelineStage::RenderDraw, t_draw.elapsed().as_nanos() as u64);
 

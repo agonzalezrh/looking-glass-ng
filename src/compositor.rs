@@ -128,6 +128,8 @@ pub struct LookingGlass {
     /// Registered frame producers (e.g. animated textures, Looking Glass)
     producers: Vec<(VisualId, Box<dyn FrameProducer>)>,
     pub perf: PerfStats,
+    pub window_size: (f32, f32),
+    pub last_mouse: (f64, f64),
 }
 
 impl LookingGlass {
@@ -153,6 +155,8 @@ impl LookingGlass {
             spatial_mode: false,
             producers: Vec::new(),
             perf: PerfStats::new(),
+            window_size: (1280.0, 720.0),
+            last_mouse: (0.0, 0.0),
         }
     }
 
@@ -420,11 +424,12 @@ impl LookingGlass {
             self.camera.yaw = 0.0;
             self.camera.pitch = 0.0;
         }
+        let (w, h) = self.window_size;
         let view = self.camera.view_matrix();
         let proj = if self.spatial_mode {
-            cgmath::perspective(cgmath::Deg(45.0), 1280.0/720.0, 1.0, 10000.0)
+            cgmath::perspective(cgmath::Deg(45.0), w / h, 1.0, 10000.0)
         } else {
-            cgmath::ortho(-640.0, 640.0, -360.0, 360.0, -1000.0, 1000.0)
+            cgmath::ortho(-w / 2.0, w / 2.0, -h / 2.0, h / 2.0, -1000.0, 1000.0)
         };
         if let Err(SwapBuffersError::ContextLost(e)) = renderer::render_scene(backend, &self.scene, &view, &proj, &mut self.perf) {
             error!(?e, "Context lost");
@@ -433,6 +438,32 @@ impl LookingGlass {
 
         self.perf.record_stage(PipelineStage::Total, t_frame.elapsed().as_nanos() as u64);
         self.perf.record_frame();
+    }
+
+    pub fn handle_click(&mut self, x: f64, y: f64) {
+        let (w, h) = self.window_size;
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let ndc_x = (x as f32 / w) * 2.0 - 1.0;
+        let ndc_y = -((y as f32 / h) * 2.0 - 1.0);
+
+        let view = self.camera.view_matrix();
+        let proj = if self.spatial_mode {
+            cgmath::perspective(cgmath::Deg(45.0), w / h, 1.0, 10000.0)
+        } else {
+            cgmath::ortho(-w / 2.0, w / 2.0, -h / 2.0, h / 2.0, -1000.0, 1000.0)
+        };
+        let pv = proj * view;
+
+        let picked = self.scene.pick(&pv, ndc_x, ndc_y);
+        if let Some((vid, dist)) = picked {
+            self.scene.select(Some(vid));
+            info!(?vid, dist, "visual selected");
+        } else {
+            self.scene.select(None);
+            info!("deselected");
+        }
     }
 }
 

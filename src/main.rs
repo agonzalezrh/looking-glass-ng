@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use compositor::{ClientState, LookingGlass};
 use producer::{HostileCheckerboard, StaticColor};
-use smithay::backend::input::{AbsolutePositionEvent, InputEvent, KeyboardKeyEvent};
+use smithay::backend::input::{AbsolutePositionEvent, InputEvent, KeyboardKeyEvent, PointerButtonEvent};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::reexports::calloop::generic::Generic;
@@ -130,6 +130,7 @@ fn main() {
         .insert_source(winit_source, |event, _, state| match event {
             WinitEvent::Resized { size, .. } => {
                 tracing::debug!("Window resized to {:?}", size);
+                state.window_size = (size.w as f32, size.h as f32);
                 state.render();
             }
             WinitEvent::Input(event) => {
@@ -147,7 +148,14 @@ fn main() {
                     InputEvent::PointerMotionAbsolute { event } => {
                         let x = event.x();
                         let y = event.y();
+                        state.last_mouse = (x, y);
                         state.camera.handle_mouse_absolute(x, y);
+                    }
+                    InputEvent::PointerButton { event } => {
+                        if event.state() == smithay::backend::input::ButtonState::Pressed {
+                            let (mx, my) = state.last_mouse;
+                            state.handle_click(mx, my);
+                        }
                     }
                     _ => {}
                 }
