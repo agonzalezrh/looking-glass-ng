@@ -192,6 +192,43 @@ impl InteractionController {
         self.active.is_some()
     }
 
+    /// Start a translate drag on the selected visual (without modifier).
+    /// Used for title-bar drags.
+    pub fn force_translate(
+        &mut self,
+        x: f64,
+        y: f64,
+        scene: &mut Scene,
+        camera: &Camera,
+        spatial_mode: bool,
+    ) {
+        let Some(vid) = scene.selected_id else { return };
+        let (nx, ny) = self.ndc(x, y);
+        let (ray_origin, ray_far) = self.world_ray(nx, ny, camera, spatial_mode);
+        let ray_dir = (ray_far - ray_origin).normalize();
+
+        if let Some(visual) = scene.visuals.iter().find(|v| v.id == vid) {
+            let pos = visual.transform.position;
+            let view_fwd = camera.view_matrix() * Vector4::new(0.0, 0.0, -1.0, 0.0);
+            let plane_normal = Vector3::new(view_fwd.x, view_fwd.y, view_fwd.z).normalize();
+
+            if !scene.detached_set.contains(&vid) {
+                scene.detached_set.push(vid);
+            }
+
+            if let Some(hit) = Self::ray_plane_intersect(ray_origin, ray_dir, pos, plane_normal) {
+                self.active = Some(ActiveManip {
+                    mode: ManipMode::Translate,
+                    origin: hit,
+                    plane_normal,
+                    start_position: pos,
+                    start_rotation: visual.transform.rotation,
+                    start_scale: visual.transform.scale,
+                });
+            }
+        }
+    }
+
     /// Handle pointer button release.
     pub fn handle_pointer_up(&mut self) {
         self.active = None;

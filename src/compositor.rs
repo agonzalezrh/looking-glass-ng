@@ -148,6 +148,9 @@ pub struct LookingGlass {
     input_sinks: HashMap<VisualId, Box<dyn InputSink>>,
 }
 
+/// Result of routing a pointer event to the selected visual's content.
+enum ContentRouting { Routed, TitleBarHit, NoTarget }
+
 impl LookingGlass {
     pub fn new(
         display_handle: &DisplayHandle,
@@ -503,12 +506,11 @@ impl LookingGlass {
 
     /// Route a pointer event to the selected visual's InputSink.
     /// Focus follows click: sets focused visual to the selected one.
-    /// Title bar hits are consumed by the compositor (no content event).
-    fn route_to_content(&mut self, kind: PointerEventKind, x: f64, y: f64) {
-        let Some(vid) = self.scene.selected_id else { return };
-        if !self.scene.is_active(vid) { return }
+    /// Title bar hits are NOT routed to content — caller should start a drag.
+    fn route_to_content(&mut self, kind: PointerEventKind, x: f64, y: f64) -> ContentRouting {
+        let Some(vid) = self.scene.selected_id else { return ContentRouting::NoTarget };
+        if !self.scene.is_active(vid) { return ContentRouting::NoTarget }
 
-        // Focus follows click + bring to front
         if kind == PointerEventKind::Down {
             self.scene.focus(Some(vid));
             self.scene.bring_to_front(vid);
@@ -520,27 +522,24 @@ impl LookingGlass {
         let ndc_y = -((y as f32 / h) * 2.0 - 1.0);
         let pv = self.proj_view();
 
-        // Use total decorated size for UV computation
         let data = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| {
             (v.transform.clone(), v.total_width(), v.total_height(), v.decoration.title_bar_height)
         });
-        let Some((transform, gw, gh, title_h)) = data else { return };
+        let Some((transform, gw, gh, title_h)) = data else { return ContentRouting::NoTarget };
 
-        // Compute UV in full decorated space
         if let Some((u, v)) = input_router::screen_to_visual_uv(
             &pv, ndc_x, ndc_y, &transform, gw, gh,
         ) {
-            // Title bar hit -> compositor action (no content event)
             let title_frac = (title_h / (1.0 + title_h)) as f64;
             if v < title_frac {
-                info!(?vid, "title bar hit, compositor consumes");
-                return;
+                return ContentRouting::TitleBarHit;
             }
-            // Content area -> route to InputSink with content-local UV
             let content_v = (v - title_frac) / (1.0 - title_frac);
-            let Some(sink) = self.input_sinks.get_mut(&vid) else { return };
+            let Some(sink) = self.input_sinks.get_mut(&vid) else { return ContentRouting::NoTarget };
             sink.handle_pointer(kind, u.clamp(0.0, 1.0), content_v.clamp(0.0, 1.0));
+            return ContentRouting::Routed;
         }
+        ContentRouting::NoTarget
     }
 
     /// Route a keyboard event to the focused visual's InputSink.
@@ -566,12 +565,22 @@ impl LookingGlass {
             x, y, &mut self.scene, &self.camera, self.spatial_mode, shift, ctrl, alt,
         );
         match mode {
-            Some(_) => {
-                // Manipulation started — event consumed by compositor
-            }
+            Some(_) => {}
             None => {
-                // No manipulation — route to content if a visual is selected
-                self.route_to_content(PointerEventKind::Down, x, y);
+                // Route to content; title bar hits start a title-bar drag
+                match self.route_to_content(PointerEventKind::Down, x, y) {
+                    ContentRouting::TitleBarHit => {
+                        // Start a translate drag from the title bar
+                        self.interaction.handle_pointer_down(
+                            x, y, &mut self.scene, &self.camera,
+                            self.spatial_mode, false, false, false,
+                        );
+                        // Force translate even though no modifier
+                        self.interaction.force_translate(x, y, &mut self.scene,
+                            &self.camera, self.spatial_mode);
+                    }
+                    _ => {}
+                }
             }
         }
     }

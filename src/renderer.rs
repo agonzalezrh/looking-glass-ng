@@ -213,6 +213,7 @@ fn do_render(
     });
 
     for visual in scene.iter() {
+        if visual.window_state == crate::scene::WindowState::Minimized { continue; }
         let Some(texture) = visual.texture() else { continue };
         let tex_id = texture.tex_id();
         let gw = visual.total_width();
@@ -275,6 +276,7 @@ pub fn render_scene(
     // Draw all visuals
     let t_draw = std::time::Instant::now();
     for visual in scene.iter() {
+        if visual.window_state == crate::scene::WindowState::Minimized { continue; }
         let Some(texture) = visual.texture() else { continue };
         let tex_id = texture.tex_id();
         let gw = visual.total_width();
