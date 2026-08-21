@@ -504,7 +504,7 @@ impl FrameProducer for KvmfrFrameProducer {
         match &self.state {
             ProducerState::LgmpConnected => crate::producer::ProviderCapabilities {
                 pointer_input: self.connection.as_ref().and_then(|c| c.cursor_queue).is_some(),
-                keyboard_input: false, // TODO: stream API
+                keyboard_input: false,
                 resize: true,
                 close: false,
                 reconnect: true,

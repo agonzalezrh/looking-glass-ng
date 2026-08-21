@@ -962,7 +962,7 @@ mod tests {
     #[test]
     fn min_max_restore_works_for_all() {
         let mut scene = Scene::default();
-        scene.focus(Some(VisualId(42)));
+        let _ = scene.focus(Some(VisualId(42)));
         assert!(scene.minimize(VisualId(42)) == false); // no such visual
         assert!(scene.maximize(VisualId(42)) == false);
         assert!(scene.restore(VisualId(42)) == false);

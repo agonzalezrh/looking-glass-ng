@@ -10,6 +10,8 @@ mod perf;
 mod producer;
 mod renderer;
 mod scene;
+#[cfg(test)]
+mod stress_tests;
 mod window;
 mod workspace;
 
