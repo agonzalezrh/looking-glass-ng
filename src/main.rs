@@ -11,6 +11,7 @@ mod producer;
 mod renderer;
 mod scene;
 mod window;
+mod workspace;
 
 use std::sync::Arc;
 

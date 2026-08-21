@@ -44,6 +44,7 @@ use crate::input_router::{self, InputSink, KeyboardEvent, PointerEventKind};
 use crate::interaction::InteractionController;
 use crate::layout;
 use crate::perf::PerfStats;
+use crate::workspace::Workspace;
 use crate::producer::{FrameProducer, FrameResult};
 use crate::scene::{Scene, Visual, VisualContent, VisualId};
 use crate::renderer;
@@ -133,6 +134,8 @@ pub struct LookingGlass {
     pub camera: Camera,
     pub spatial_mode: bool,
     pub layout_mode: layout::LayoutMode,
+    pub workspaces: Vec<Workspace>,
+    pub active_workspace: usize,
     /// Registered frame producers (e.g. animated textures, Looking Glass)
     producers: Vec<(VisualId, Box<dyn FrameProducer>)>,
     pub perf: PerfStats,
@@ -167,6 +170,8 @@ impl LookingGlass {
             camera: Camera::new(),
             spatial_mode: false,
             layout_mode: layout::LayoutMode::Freeform,
+            workspaces: vec![Workspace::new(), Workspace::new(), Workspace::new()],
+            active_workspace: 0,
             producers: Vec::new(),
             perf: PerfStats::new(),
             window_size: (1280.0, 720.0),
@@ -636,12 +641,47 @@ impl LookingGlass {
         result
     }
 
+    /// Save the current workspace state to the active workspace slot.
+    fn sync_active_workspace(&mut self) {
+        if let Some(ws) = self.workspaces.get_mut(self.active_workspace) {
+            ws.camera = self.camera.clone();
+            ws.layout_mode = self.layout_mode;
+        }
+    }
+
+    /// Load workspace state from a slot into the active camera/layout.
+    fn load_workspace(&mut self, idx: usize) {
+        if idx >= self.workspaces.len() {
+            return;
+        }
+        self.sync_active_workspace();
+        if let Some(ws) = self.workspaces.get(idx) {
+            self.camera = ws.camera.clone();
+            self.layout_mode = ws.layout_mode;
+        }
+        self.active_workspace = idx;
+    }
+
+    /// Switch to a workspace by index (0-2).
+    pub fn switch_workspace(&mut self, idx: usize) {
+        if idx < self.workspaces.len() && idx != self.active_workspace {
+            self.load_workspace(idx);
+            info!(workspace = idx, "switched workspace");
+        }
+    }
+
     /// Public entry point for keyboard events.
     /// Routes to the focused visual's InputSink.
     /// Tab key (23) is always consumed by the compositor for spatial mode toggle.
     pub fn handle_key(&mut self, linux_key: u32, pressed: bool) {
-        // Composite press events only for shortcuts, but always route all events
         if pressed {
+            // F1/F2/F3 -> switch workspaces 0/1/2 (X11 keycodes 67=F1, 68=F2, 69=F3)
+            match linux_key {
+                67 => { self.switch_workspace(0); return; }
+                68 => { self.switch_workspace(1); return; }
+                69 => { self.switch_workspace(2); return; }
+                _ => {}
+            }
             // Tab — spatial mode toggle
             if linux_key == 23 {
                 self.spatial_mode = !self.spatial_mode;
