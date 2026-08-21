@@ -5,6 +5,18 @@ use smithay::backend::renderer::ImportMem;
 
 use crate::input_router::InputSink;
 
+/// Capabilities a content provider can advertise.
+/// The compositor uses these to determine which operations are available
+/// without knowing the concrete provider implementation.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderCapabilities {
+    pub pointer_input: bool,
+    pub keyboard_input: bool,
+    pub resize: bool,
+    pub close: bool,
+    pub reconnect: bool,
+}
+
 /// Result of a frame update.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameResult {
@@ -40,6 +52,8 @@ pub trait FrameProducer {
     /// Optionally create an InputSink for this producer's content.
     /// Returns None if the producer doesn't support input routing.
     fn create_input_sink(&mut self) -> Option<Box<dyn InputSink>> { None }
+    /// Report provider capabilities.
+    fn capabilities(&self) -> ProviderCapabilities { ProviderCapabilities::default() }
 }
 
 /// An animated checkerboard that deliberately tests edge cases.
@@ -127,6 +141,16 @@ impl FrameProducer for StaticColor {
 }
 
 impl FrameProducer for HostileCheckerboard {
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            pointer_input: false,
+            keyboard_input: false,
+            resize: true,
+            close: true,
+            reconnect: false,
+        }
+    }
+
     fn update(&mut self, renderer: &mut GlesRenderer) -> FrameResult {
         self.frame_count += 1;
 

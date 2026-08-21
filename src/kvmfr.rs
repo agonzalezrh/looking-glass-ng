@@ -499,6 +499,25 @@ impl FrameProducer for KvmfrFrameProducer {
         }
         Some(Box::new(LogInputSink))
     }
+
+    fn capabilities(&self) -> crate::producer::ProviderCapabilities {
+        match &self.state {
+            ProducerState::LgmpConnected => crate::producer::ProviderCapabilities {
+                pointer_input: self.connection.as_ref().and_then(|c| c.cursor_queue).is_some(),
+                keyboard_input: false, // TODO: stream API
+                resize: true,
+                close: false,
+                reconnect: true,
+            },
+            _ => crate::producer::ProviderCapabilities {
+                pointer_input: true,
+                keyboard_input: true,
+                resize: true,
+                close: false,
+                reconnect: false,
+            },
+        }
+    }
 }
 
 impl KvmfrFrameProducer {

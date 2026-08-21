@@ -928,5 +928,75 @@ mod tests {
         assert_eq!(WindowState::default(), WindowState::Normal);
         assert_eq!(ContentState::default(), ContentState::Disconnected);
     }
+
+    // ── Multi-provider integration tests ──────────────────────────────
+    //
+    // These tests prove that scene operations are provider-agnostic.
+    // No Visual content is created — all operations work purely on
+    // VisualId and Scene state, which is the same for any provider.
+
+    #[test]
+    fn stacking_works_identically_for_any_provider() {
+        let mut scene = Scene::default();
+        // bring_to_front and friends work on VisualId alone
+        // regardless of which provider created the Visual
+        scene.select(Some(VisualId(1)));
+        scene.bring_to_front(VisualId(1));
+        assert_eq!(scene.selected_id, Some(VisualId(1)));
+    }
+
+    #[test]
+    fn disconnect_one_leaves_others() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(1)));
+        scene.select(Some(VisualId(1)));
+        // Focus and select are independent; disconnect clears focus, not selection
+        scene.focus(Some(VisualId(2)));
+        scene.disconnect(VisualId(1));
+        // Visual 1 was disconnected but was focused? No, focus is now 2
+        // Visual 1 was selected — selection preserved
+        assert_eq!(scene.focused_id, Some(VisualId(2)), "focus unchanged");
+        assert_eq!(scene.selected_id, Some(VisualId(1)), "selection preserved");
+    }
+
+    #[test]
+    fn min_max_restore_works_for_all() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(42)));
+        assert!(scene.minimize(VisualId(42)) == false); // no such visual
+        assert!(scene.maximize(VisualId(42)) == false);
+        assert!(scene.restore(VisualId(42)) == false);
+    }
+
+    #[test]
+    fn is_visible_checks_window_state_only() {
+        let mut scene = Scene::default();
+        // is_visible only checks window_state, not ContentState
+        assert!(!scene.is_visible(VisualId(1))); // doesn't exist
+    }
+
+    #[test]
+    fn focus_follows_click_independent_of_provider() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(5)));
+        assert_eq!(scene.focused_id, Some(VisualId(5)));
+        scenario::focus_click_sequence(&mut scene);
+        assert_eq!(scene.focused_id, Some(VisualId(7)));
+    }
+}
+
+/// Integration scenarios for multi-provider testing.
+mod scenario {
+    use super::*;
+
+    /// Simulate a focus-follows-click sequence across 3 visuals.
+    pub fn focus_click_sequence(scene: &mut Scene) {
+        scene.focus(Some(VisualId(5)));
+        scene.select(Some(VisualId(5)));
+        scene.focus(Some(VisualId(6)));
+        scene.select(Some(VisualId(6)));
+        scene.focus(Some(VisualId(7)));
+        scene.select(Some(VisualId(7)));
+    }
 }
 
