@@ -151,6 +151,9 @@ pub struct LookingGlass {
     pub wayland_surfaces: HashMap<VisualId, WlSurface>,
     pub pointer_handle: Option<PointerHandle<Self>>,
     pub keyboard_handle: Option<KeyboardHandle<Self>>,
+    /// Track the last Wayland surface that received pointer focus
+    /// for proper enter/leave event sequencing.
+    last_wayland_focus: Option<WlSurface>,
 }
 
 /// Result of routing a pointer event to the selected visual's content.
@@ -199,6 +202,7 @@ impl LookingGlass {
             wayland_surfaces: HashMap::new(),
             pointer_handle,
             keyboard_handle,
+            last_wayland_focus: None,
         }
     }
 
@@ -608,8 +612,17 @@ impl LookingGlass {
     fn route_keyboard(&mut self, key: u32, pressed: bool) {
         let Some(vid) = self.scene.focused_id else { return };
         if !self.scene.is_active(vid) { return }
+
+        // For Wayland surfaces, set keyboard focus via KeyboardHandle
+        let wl_focus = self.wayland_surfaces.get(&vid).cloned();
+        let kh = self.keyboard_handle.clone();
+        if let (Some(wl_surface), Some(ref kh_handle)) = (wl_focus, kh) {
+            kh_handle.set_focus(self, Some(wl_surface), smithay::utils::Serial::from(0));
+            return;
+        }
+
+        // For external producers (non-Wayland), use InputSink path
         let Some(sink) = self.input_sinks.get_mut(&vid) else { return };
-        // Winit on X11 adds 8 to the evdev scancode. Detect and adjust.
         let evdev = if key > 8 { key - 8 } else { key };
         let hid = input_router::linux_to_hid(evdev);
         if hid == 0 {
@@ -669,7 +682,54 @@ impl LookingGlass {
             return;
         }
         self.interaction.window_size = self.window_size;
+        let was_dragging = self.interaction.is_dragging();
         self.interaction.handle_pointer_move(x, y, &mut self.scene, &self.camera, self.spatial_mode);
+        // If not dragging, route hover events to Wayland surfaces
+        if !was_dragging && !self.interaction.is_dragging() {
+            self.route_hover(x, y);
+        }
+    }
+
+    /// Route hover (pointer motion without button) to the visual under cursor.
+    /// Picks the visual, computes UV, and emits Wayland pointer motion events.
+    fn route_hover(&mut self, x: f64, y: f64) {
+        let (w, h) = self.window_size;
+        if w <= 0.0 || h <= 0.0 { return; }
+        let ndc_x = (x as f32 / w) * 2.0 - 1.0;
+        let ndc_y = -((y as f32 / h) * 2.0 - 1.0);
+        let pv = self.proj_view();
+        let picked = self.scene.pick(&pv, ndc_x, ndc_y);
+        let Some((vid, _dist)) = picked else { return };
+        if !self.scene.is_active(vid) { return }
+
+        // Emit Wayland pointer motion for the hovered surface
+        let wl_surface = self.wayland_surfaces.get(&vid).cloned();
+        let pointer_handle = self.pointer_handle.clone();
+        let gw = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| v.geometry.size.w as f64);
+        let gh = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| v.geometry.size.h as f64);
+        // Compute UV (center of visual for hover)
+        // For proper UV we'd need screen_to_visual_uv. Simple hover = center for now.
+        let data = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| {
+            (v.transform.clone(), v.total_width(), v.total_height())
+        });
+        let Some((transform, total_w, total_h)) = data else { return };
+
+        if let (Some(wl_surface), Some(ph)) = (wl_surface, pointer_handle) {
+            if let Some((u, v)) = input_router::screen_to_visual_uv(&pv, ndc_x, ndc_y, &transform, total_w, total_h) {
+                let title_frac = 0.06f64 / 1.06f64; // default decoration ratio
+                if v < title_frac { return; } // title bar — no content event
+                let content_v = (v - title_frac) / (1.0 - title_frac);
+                let px = u.clamp(0.0, 1.0) * gw.unwrap_or(1.0);
+                let py = content_v.clamp(0.0, 1.0) * gh.unwrap_or(1.0);
+                let pos: smithay::utils::Point<f64, smithay::utils::Logical> = (px, py).into();
+                let mot_ev = MotionEvent {
+                    location: pos,
+                    serial: smithay::utils::Serial::from(0),
+                    time: 0,
+                };
+                ph.motion(self, Some((wl_surface, pos)), &mot_ev);
+            }
+        }
     }
 
     /// Center the camera on the currently selected visual.
