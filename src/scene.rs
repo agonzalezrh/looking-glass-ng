@@ -406,5 +406,53 @@ mod tests {
         scene.focus(None);
         assert_eq!(scene.focused_id, None);
     }
+
+    // ── Focus lifecycle tests ──────────────────────────────────────────
+
+    #[test]
+    fn remove_destroyed_cleans_selected() {
+        let mut scene = Scene::default();
+        scene.select(Some(VisualId(42)));
+        scene.remove(VisualId(42));
+        assert_eq!(scene.selected_id, None);
+    }
+
+    #[test]
+    fn remove_destroyed_cleans_focused() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(42)));
+        scene.remove(VisualId(42));
+        assert_eq!(scene.focused_id, None);
+    }
+
+    #[test]
+    fn remove_destroyed_cleans_hovered() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(42)));
+        scene.focus(Some(VisualId(7)));
+        scene.select(Some(VisualId(7)));
+        // Remove non-focused, non-selected visual — others untouched
+        scene.remove(VisualId(42));
+        assert_eq!(scene.focused_id, Some(VisualId(7)));
+        assert_eq!(scene.selected_id, Some(VisualId(7)));
+    }
+
+    #[test]
+    fn select_different_visual_leaves_focus() {
+        let mut scene = Scene::default();
+        scene.focus(Some(VisualId(1)));
+        scene.select(Some(VisualId(2)));
+        assert_eq!(scene.focused_id, Some(VisualId(1)), "focus unchanged after select");
+        assert_eq!(scene.selected_id, Some(VisualId(2)), "selected changed");
+    }
+
+    #[test]
+    fn focus_different_visual_leaves_selected() {
+        let mut scene = Scene::default();
+        scene.select(Some(VisualId(1)));
+        scene.focus(Some(VisualId(2)));
+        assert_eq!(scene.selected_id, Some(VisualId(1)), "selected unchanged after focus");
+        assert_eq!(scene.focused_id, Some(VisualId(2)), "focused changed");
+    }
 }
 

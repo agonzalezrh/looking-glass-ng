@@ -35,6 +35,42 @@ pub trait InputSink: std::fmt::Debug {
     fn handle_keyboard(&mut self, event: KeyboardEvent);
 }
 
+/// Classification of a keyboard event's routing destination.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum KeyRouting {
+    /// Compositor global shortcut (Tab, etc.)
+    Global,
+    /// Route to the focused visual's InputSink
+    Content,
+}
+
+/// A recording input sink for testing multi-visual input routing.
+/// Records all events it receives for later assertion.
+#[derive(Debug, Default, Clone)]
+pub struct RecordingInputSink {
+    pub pointers: Vec<(PointerEventKind, f64, f64)>,
+    pub keys: Vec<KeyboardEvent>,
+}
+
+impl RecordingInputSink {
+    pub fn new() -> Self {
+        RecordingInputSink { pointers: Vec::new(), keys: Vec::new() }
+    }
+    pub fn clear(&mut self) {
+        self.pointers.clear();
+        self.keys.clear();
+    }
+}
+
+impl InputSink for RecordingInputSink {
+    fn handle_pointer(&mut self, kind: PointerEventKind, u: f64, v: f64) {
+        self.pointers.push((kind, u, v));
+    }
+    fn handle_keyboard(&mut self, event: KeyboardEvent) {
+        self.keys.push(event);
+    }
+}
+
 /// Convert a Linux evdev key code (as used by winit) to USB HID usage ID.
 /// Returns 0 for unmapped keys.
 pub fn linux_to_hid(code: u32) -> u16 {
@@ -245,5 +281,122 @@ mod tests {
     #[test]
     fn uv_to_pixel_edge_clamp() {
         assert_eq!(uv_to_pixels(1.0, 1.0, 1920, 1080), (1919, 1079));
+    }
+
+    // ── HID mapping validation ─────────────────────────────────────────
+
+    #[test]
+    fn linux_to_hid_modifiers() {
+        assert_eq!(linux_to_hid(29), 0xe1, "left ctrl");
+        assert_eq!(linux_to_hid(42), 0xe1, "left shift");
+        assert_eq!(linux_to_hid(56), 0xe2, "left alt");
+        assert_eq!(linux_to_hid(54), 0xe5, "right shift");
+    }
+
+    #[test]
+    fn linux_to_hid_navigation() {
+        assert_eq!(linux_to_hid(74), 0x49, "insert");
+        assert_eq!(linux_to_hid(75), 0x4a, "home");
+        assert_eq!(linux_to_hid(76), 0x4b, "page up");
+        assert_eq!(linux_to_hid(77), 0x4c, "delete");
+        assert_eq!(linux_to_hid(78), 0x4d, "end");
+        assert_eq!(linux_to_hid(79), 0x4e, "page down");
+        assert_eq!(linux_to_hid(80), 0x4f, "right arrow");
+        assert_eq!(linux_to_hid(81), 0x50, "left arrow");
+        assert_eq!(linux_to_hid(82), 0x51, "down arrow");
+        assert_eq!(linux_to_hid(83), 0x52, "up arrow");
+    }
+
+    #[test]
+    fn linux_to_hid_function_keys() {
+        for i in 0..12 {
+            let hid = linux_to_hid(59 + i);
+            assert_eq!(hid, 0x3a + i as u16, "F{}", i + 1);
+        }
+        assert_eq!(linux_to_hid(104), 0x67, "F13");
+        assert_eq!(linux_to_hid(105), 0x68, "F14");
+        assert_eq!(linux_to_hid(115), 0x72, "F24");
+    }
+
+    #[test]
+    fn linux_to_hid_important_keys() {
+        assert_eq!(linux_to_hid(1), 0x29, "escape");
+        assert_eq!(linux_to_hid(15), 0x2b, "tab");
+        assert_eq!(linux_to_hid(28), 0x28, "enter");
+        assert_eq!(linux_to_hid(14), 0x2a, "backspace");
+        assert_eq!(linux_to_hid(57), 0x2c, "space");
+        assert_eq!(linux_to_hid(58), 0x39, "caps lock");
+        assert_eq!(linux_to_hid(2), 0x1e, "1");
+        assert_eq!(linux_to_hid(11), 0x27, "0");
+    }
+
+    #[test]
+    fn linux_to_hid_numbers() {
+        for i in 0..10 {
+            let hid = linux_to_hid(2 + i);
+            assert_eq!(hid, 0x1e + i as u16, "key {}", i);
+        }
+    }
+
+    // ── RecordingInputSink tests ──────────────────────────────────────
+
+    #[test]
+    fn recording_input_sink_records_pointer() {
+        let mut sink = RecordingInputSink::new();
+        sink.handle_pointer(PointerEventKind::Down, 0.5, 0.5);
+        sink.handle_pointer(PointerEventKind::Motion, 0.6, 0.5);
+        sink.handle_pointer(PointerEventKind::Up, 0.6, 0.5);
+        assert_eq!(sink.pointers.len(), 3);
+        assert_eq!(sink.pointers[0], (PointerEventKind::Down, 0.5, 0.5));
+        assert_eq!(sink.pointers[1], (PointerEventKind::Motion, 0.6, 0.5));
+        assert_eq!(sink.pointers[2], (PointerEventKind::Up, 0.6, 0.5));
+    }
+
+    #[test]
+    fn recording_input_sink_records_keyboard() {
+        let mut sink = RecordingInputSink::new();
+        sink.handle_keyboard(KeyboardEvent { key: 0x04, pressed: true });  // a down
+        sink.handle_keyboard(KeyboardEvent { key: 0x04, pressed: false }); // a up
+        sink.handle_keyboard(KeyboardEvent { key: 0x05, pressed: true });  // b down
+        assert_eq!(sink.keys.len(), 3);
+        assert_eq!(sink.keys[0], KeyboardEvent { key: 0x04, pressed: true });
+        assert_eq!(sink.keys[1], KeyboardEvent { key: 0x04, pressed: false });
+        assert_eq!(sink.keys[2], KeyboardEvent { key: 0x05, pressed: true });
+    }
+
+    #[test]
+    fn recording_input_sink_clear() {
+        let mut sink = RecordingInputSink::new();
+        sink.handle_keyboard(KeyboardEvent { key: 0x04, pressed: true });
+        sink.clear();
+        assert!(sink.keys.is_empty());
+        assert!(sink.pointers.is_empty());
+    }
+
+    // ── Two independent sinks test ─────────────────────────────────────
+
+    #[test]
+    fn two_independent_sinks() {
+        let mut sink1 = RecordingInputSink::new();
+        let mut sink2 = RecordingInputSink::new();
+
+        // Click #1 → only sink1 sees pointer
+        sink1.handle_pointer(PointerEventKind::Down, 0.3, 0.4);
+        sink2.handle_pointer(PointerEventKind::Down, 0.3, 0.4);
+        assert_eq!(sink1.pointers.len(), 1);
+        assert_eq!(sink2.pointers.len(), 1);
+
+        // Keyboard to #1 → only sink1 sees keyboard
+        sink1.handle_keyboard(KeyboardEvent { key: 0x04, pressed: true });
+        assert_eq!(sink1.keys.len(), 1);
+        assert_eq!(sink2.keys.len(), 0);
+
+        // Keyboard to #2 → only sink2 sees keyboard
+        sink2.handle_keyboard(KeyboardEvent { key: 0x05, pressed: true });
+        assert_eq!(sink1.keys.len(), 1);
+        assert_eq!(sink2.keys.len(), 1);
+
+        sink2.clear();
+        assert_eq!(sink2.keys.len(), 0);
     }
 }

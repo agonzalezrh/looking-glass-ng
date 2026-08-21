@@ -502,10 +502,14 @@ impl LookingGlass {
     }
 
     /// Route a keyboard event to the focused visual's InputSink.
+    /// key: winit platform key code (X11 keycodes when under X11, offset +8 from evdev).
+    /// The offset is subtracted to get raw evdev codes for HID mapping.
     fn route_keyboard(&mut self, key: u32, pressed: bool) {
         let Some(vid) = self.scene.focused_id else { return };
         let Some(sink) = self.input_sinks.get_mut(&vid) else { return };
-        let hid = input_router::linux_to_hid(key);
+        // Winit on X11 adds 8 to the evdev scancode. Detect and adjust.
+        let evdev = if key > 8 { key - 8 } else { key };
+        let hid = input_router::linux_to_hid(evdev);
         if hid == 0 {
             return; // unmapped key
         }
