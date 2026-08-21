@@ -120,6 +120,7 @@ pub struct Visual {
     pub content: VisualContent,
     pub geometry: Rectangle<i32, smithay::utils::Logical>,
     pub transform: Transform3D,
+    pub parent: Option<VisualId>,
     pub selected: bool,
     pub focused: bool,
     pub content_state: ContentState,
@@ -136,6 +137,7 @@ impl Visual {
             content,
             geometry,
             transform: Transform3D::identity(),
+            parent: None,
             selected: false,
             focused: false,
             content_state: ContentState::Ready,
@@ -247,6 +249,79 @@ impl Scene {
     /// Check if a visual is visible (not minimized).
     pub fn is_visible(&self, id: VisualId) -> bool {
         self.visuals.iter().any(|v| v.id == id && v.window_state != WindowState::Minimized)
+    }
+
+    /// Compute the world-space transform matrix for a visual by composing
+    /// parent chains. Returns identity matrix if the visual doesn't exist.
+    /// Order: parent transforms on the left, child on the right:
+    ///   world = parent_local * grandparent_local * ... * child_local
+    /// where `to_matrix()` is T * R * S.
+    pub fn world_matrix(&self, id: VisualId) -> Matrix4<f32> {
+        let mut visited = 0u32;
+        let mut current = id;
+        let mut chain: Vec<Matrix4<f32>> = Vec::new();
+        loop {
+            visited += 1;
+            if visited > 32 { break; }
+            let visual = match self.visuals.iter().find(|v| v.id == current) {
+                Some(v) => v,
+                None => break,
+            };
+            chain.push(visual.transform.to_matrix());
+            match visual.parent {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+        // Compose: parent transforms on the left, iterate reversed
+        // world = start identity * child_local * parent_local * grandparent_local...
+        // Actually: position(child) is in parent space. So:
+        // world(child) = world(parent) * child_local
+        // We compute by walking up, then composing down:
+        let mut result = Matrix4::identity();
+        for m in chain.iter().rev() {
+            result = result * m;
+        }
+        result
+    }
+
+    /// Set a visual's parent. Returns an error if it would create a cycle.
+    pub fn set_parent(&mut self, child: VisualId, new_parent: VisualId) -> Result<(), String> {
+        if child == new_parent {
+            return Err("cannot parent to self".into());
+        }
+        let child_idx = match self.visuals.iter().position(|v| v.id == child) {
+            Some(i) => i,
+            None => return Err("child not found".into()),
+        };
+        if !self.visuals.iter().any(|v| v.id == new_parent) {
+            return Err("parent not found".into());
+        }
+        // Cycle detection: walk from new_parent upwards
+        let mut current = new_parent;
+        for _ in 0..32 {
+            if current == child {
+                return Err("cycle detected".into());
+            }
+            let visual = match self.visuals.iter().find(|v| v.id == current) {
+                Some(v) => v,
+                None => break,
+            };
+            match visual.parent {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+        self.visuals[child_idx].parent = Some(new_parent);
+        Ok(())
+    }
+
+    /// Remove a visual's parent relationship. Returns true if found.
+    pub fn clear_parent(&mut self, id: VisualId) -> bool {
+        match self.visuals.iter_mut().find(|v| v.id == id) {
+            Some(v) => { v.parent = None; true }
+            None => false,
+        }
     }
 
     /// Minimize a visual: hide it but preserve all state.
@@ -982,6 +1057,40 @@ mod tests {
         assert_eq!(scene.focused_id, Some(VisualId(5)));
         scenario::focus_click_sequence(&mut scene);
         assert_eq!(scene.focused_id, Some(VisualId(7)));
+    }
+
+    // ── Spatial relationship tests ────────────────────────────────────
+
+    #[test]
+    fn set_parent_self_rejected() {
+        let mut scene = Scene::default();
+        assert_eq!(scene.set_parent(VisualId(1), VisualId(1)).unwrap_err(), "cannot parent to self");
+    }
+
+    #[test]
+    fn set_parent_unknown_child() {
+        let mut scene = Scene::default();
+        assert!(scene.set_parent(VisualId(1), VisualId(2)).is_err());
+    }
+
+    #[test]
+    fn clear_parent_unknown() {
+        let mut scene = Scene::default();
+        assert!(!scene.clear_parent(VisualId(999)));
+    }
+
+    #[test]
+    fn world_matrix_unknown_returns_identity() {
+        let mut scene = Scene::default();
+        let m = scene.world_matrix(VisualId(999));
+        assert!((m[0][0] - 1.0).abs() < 1e-4);
+        assert!((m[3][0]).abs() < 1e-4);
+    }
+
+    #[test]
+    fn parent_cycle_rejected() {
+        let mut scene = Scene::default();
+        assert!(scene.set_parent(VisualId(1), VisualId(2)).is_err());
     }
 }
 

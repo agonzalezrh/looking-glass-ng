@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use cgmath::Matrix;
+use cgmath::Matrix3;
 use cgmath::Matrix4;
 use smithay::backend::renderer::gles::ffi;
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -239,9 +240,17 @@ fn do_render(
         let gh = visual.total_height();
         let title_h = visual.decoration.title_bar_height / (1.0 + visual.decoration.title_bar_height);
 
-        let pos = visual.transform.position;
-        let model = Matrix4::from_translation(pos)
-            * Matrix4::from(visual.transform.rotation)
+        // Use world-space position and rotation (scale stays local)
+        let world = scene.world_matrix(visual.id);
+        let wx = world[3][0]; let wy = world[3][1]; let wz = world[3][2];
+        let m3 = cgmath::Matrix3::new(
+            world[0][0], world[0][1], world[0][2],
+            world[1][0], world[1][1], world[1][2],
+            world[2][0], world[2][1], world[2][2],
+        );
+        let rot = cgmath::Quaternion::from(m3);
+        let model = Matrix4::from_translation(cgmath::Vector3::new(wx, wy, wz))
+            * Matrix4::from(rot)
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
         let mvp = proj * view * model;
         let _ = frame.with_context(|gl| draw_textured_quad(gl, draw, &mvp, tex_id, visual.selected, visual.focused, title_h));
@@ -303,12 +312,19 @@ pub fn render_scene(
         let gw = visual.total_width();
         let gh = visual.total_height();
         let title_h = visual.decoration.title_bar_height / (1.0 + visual.decoration.title_bar_height);
-        let pos = visual.transform.position;
-        let model = Matrix4::from_translation(pos)
-            * Matrix4::from(visual.transform.rotation)
+        let world = scene.world_matrix(visual.id);
+        let wx = world[3][0]; let wy = world[3][1]; let wz = world[3][2];
+        let m3 = cgmath::Matrix3::new(
+            world[0][0], world[0][1], world[0][2],
+            world[1][0], world[1][1], world[1][2],
+            world[2][0], world[2][1], world[2][2],
+        );
+        let rot = cgmath::Quaternion::from(m3);
+        let model = Matrix4::from_translation(cgmath::Vector3::new(wx, wy, wz))
+            * Matrix4::from(rot)
             * Matrix4::from_nonuniform_scale(gw, gh, 1.0);
         let mvp = proj * view * model;
-        let _ = frame.with_context(|gl| draw_textured_quad(gl, &draw, &mvp, tex_id, visual.selected, visual.focused, title_h));
+        let _ = frame.with_context(|gl| draw_textured_quad(gl, draw, &mvp, tex_id, visual.selected, visual.focused, title_h));
     }
     perf.record_stage(PipelineStage::RenderDraw, t_draw.elapsed().as_nanos() as u64);
 
