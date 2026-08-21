@@ -168,9 +168,89 @@ impl Scene {
         }
     }
 
+    // ── Stacking order ────────────────────────────────────────────────
+    //
+    // Stacking order is determined by position in visuals[]:
+    //   first = bottom (drawn first, behind)
+    //   last  = top   (drawn last, in front)
+    //
+    // The renderer draws visuals in iteration order, so the last visual
+    // in the vector appears on top. GPU depth testing resolves actual
+    // Z-depth, but for visuals at the same depth, list order decides.
+
+    fn find_index(&self, id: VisualId) -> Option<usize> {
+        self.visuals.iter().position(|v| v.id == id)
+    }
+
+    /// Move a visual to the top of the stacking order.
+    /// Returns true if the visual was found and moved.
+    pub fn bring_to_front(&mut self, id: VisualId) -> bool {
+        let idx = match self.find_index(id) {
+            Some(i) => i,
+            None => return false,
+        };
+        if idx == self.visuals.len() - 1 {
+            return true; // already on top
+        }
+        let visual = self.visuals.remove(idx);
+        self.visuals.push(visual);
+        true
+    }
+
+    /// Move a visual to the bottom of the stacking order.
+    pub fn send_to_back(&mut self, id: VisualId) -> bool {
+        let idx = match self.find_index(id) {
+            Some(i) => i,
+            None => return false,
+        };
+        if idx == 0 {
+            return true;
+        }
+        let visual = self.visuals.remove(idx);
+        self.visuals.insert(0, visual);
+        true
+    }
+
+    /// Raise a visual by one position in the stacking order.
+    pub fn raise(&mut self, id: VisualId) -> bool {
+        let idx = match self.find_index(id) {
+            Some(i) => i,
+            None => return false,
+        };
+        if idx >= self.visuals.len() - 1 {
+            return true; // already top
+        }
+        self.visuals.swap(idx, idx + 1);
+        true
+    }
+
+    /// Lower a visual by one position in the stacking order.
+    pub fn lower(&mut self, id: VisualId) -> bool {
+        let idx = match self.find_index(id) {
+            Some(i) => i,
+            None => return false,
+        };
+        if idx == 0 {
+            return true; // already bottom
+        }
+        self.visuals.swap(idx, idx - 1);
+        true
+    }
+
+    /// Reset a visual's transform to identity (position 0,0,0, no rotation, scale 1).
+    pub fn reset_transform(&mut self, id: VisualId) -> bool {
+        match self.get_mut(id) {
+            Some(v) => {
+                v.transform = Transform3D::identity();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Pick the closest visual under a screen coordinate.
-    /// `proj_view` = projection × view matrix from the camera.
-    /// `ndc_x` / `ndc_y` = normalized device coordinates [-1..1].
+    /// When two visuals are at the same depth, the one on top (later in
+    /// stacking order) wins.
     pub fn pick(
         &self,
         proj_view: &Matrix4<f32>,
@@ -253,7 +333,7 @@ fn pick_visual_items(
         let dist = (world_hit - near).magnitude();
 
         match closest {
-            Some((_, closest_dist)) if dist >= closest_dist => {}
+            Some((_, closest_dist)) if dist > closest_dist => {}
             _ => closest = Some((*id, dist)),
         }
     }
@@ -453,6 +533,133 @@ mod tests {
         scene.focus(Some(VisualId(2)));
         assert_eq!(scene.selected_id, Some(VisualId(1)), "selected unchanged after focus");
         assert_eq!(scene.focused_id, Some(VisualId(2)), "focused changed");
+    }
+
+    // ── Stacking / picking tie-break tests ─────────────────────────────
+
+    #[test]
+    fn pick_at_same_depth_later_wins() {
+        // Two visuals at exactly the same position and depth.
+        // The later one in the list (stacking "top") should be picked.
+        let items = vec![
+            (
+                VisualId(1),
+                Transform3D {
+                    position: Vector3::new(0.0, 0.0, 0.0),
+                    rotation: Quaternion::from_angle_z(Deg(0.0)),
+                    scale: Vector3::new(1.0, 1.0, 1.0),
+                },
+                (200.0, 100.0),
+            ),
+            (
+                VisualId(2),
+                Transform3D {
+                    position: Vector3::new(0.0, 0.0, 0.0),
+                    rotation: Quaternion::from_angle_z(Deg(0.0)),
+                    scale: Vector3::new(1.0, 1.0, 1.0),
+                },
+                (200.0, 100.0),
+            ),
+        ];
+        let view = Matrix4::look_at_rh(
+            cgmath::Point3::new(0.0, 0.0, 500.0),
+            cgmath::Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        );
+        let proj = cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0);
+        // Both at same depth — later (id=2) should win
+        let r = pick_visual_items(&(proj * view), 0.0, 0.0, &items);
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().0, VisualId(2), "topmost (id=2) should win at equal depth");
+    }
+
+    #[test]
+    fn pick_at_same_depth_reversed_order() {
+        // Same as above but with items in reverse order
+        let items = vec![
+            (
+                VisualId(2),
+                Transform3D {
+                    position: Vector3::new(0.0, 0.0, 0.0),
+                    rotation: Quaternion::from_angle_z(Deg(0.0)),
+                    scale: Vector3::new(1.0, 1.0, 1.0),
+                },
+                (200.0, 100.0),
+            ),
+            (
+                VisualId(1),
+                Transform3D {
+                    position: Vector3::new(0.0, 0.0, 0.0),
+                    rotation: Quaternion::from_angle_z(Deg(0.0)),
+                    scale: Vector3::new(1.0, 1.0, 1.0),
+                },
+                (200.0, 100.0),
+            ),
+        ];
+        let view = Matrix4::look_at_rh(
+            cgmath::Point3::new(0.0, 0.0, 500.0),
+            cgmath::Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        );
+        let proj = cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0);
+        // Now id=1 is later in list — should win
+        let r = pick_visual_items(&(proj * view), 0.0, 0.0, &items);
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().0, VisualId(1), "topmost (later in list) should win");
+    }
+
+    #[test]
+    fn stacking_unknown_visual_returns_false() {
+        let mut scene = Scene::default();
+        assert!(!scene.bring_to_front(VisualId(999)));
+        assert!(!scene.send_to_back(VisualId(999)));
+        assert!(!scene.raise(VisualId(999)));
+        assert!(!scene.lower(VisualId(999)));
+        assert!(!scene.reset_transform(VisualId(999)));
+    }
+
+    #[test]
+    fn bring_to_front_changes_pick_order() {
+        use cgmath::Matrix4;
+        // Simulate: add A then B. A is at bottom, B is on top.
+        // At same depth, B wins. Then bring A to front -> A wins.
+        // We verify using pick_visual_items with items in same order.
+        let items_before = vec![
+            (
+                VisualId(1), // A
+                Transform3D {
+                    position: Vector3::new(0.0, 0.0, 0.0),
+                    rotation: Quaternion::from_angle_z(Deg(0.0)),
+                    scale: Vector3::new(1.0, 1.0, 1.0),
+                },
+                (200.0, 100.0),
+            ),
+            (
+                VisualId(2), // B
+                Transform3D {
+                    position: Vector3::new(0.0, 0.0, 0.0),
+                    rotation: Quaternion::from_angle_z(Deg(0.0)),
+                    scale: Vector3::new(1.0, 1.0, 1.0),
+                },
+                (200.0, 100.0),
+            ),
+        ];
+        let view = Matrix4::look_at_rh(
+            cgmath::Point3::new(0.0, 0.0, 500.0),
+            cgmath::Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        );
+        let proj = cgmath::ortho(-320.0, 320.0, -240.0, 240.0, 1.0, 1000.0);
+        // Before: B (id=2, later) wins
+        let r = pick_visual_items(&(proj * view), 0.0, 0.0, &items_before);
+        assert_eq!(r.unwrap().0, VisualId(2));
+
+        // After "bring_to_front": A should now be at the end
+        let mut items_after = items_before.clone();
+        let a = items_after.remove(0);
+        items_after.push(a);
+        let r = pick_visual_items(&(proj * view), 0.0, 0.0, &items_after);
+        assert_eq!(r.unwrap().0, VisualId(1), "A brought to front should now win");
     }
 }
 

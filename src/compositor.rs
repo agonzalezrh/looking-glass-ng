@@ -477,10 +477,11 @@ impl LookingGlass {
     fn route_to_content(&mut self, kind: PointerEventKind, x: f64, y: f64) {
         let Some(vid) = self.scene.selected_id else { return };
 
-        // Focus follows click
+        // Focus follows click + bring to front
         if kind == PointerEventKind::Down {
             self.scene.focus(Some(vid));
-            info!(?vid, "focus set");
+            self.scene.bring_to_front(vid);
+            info!(?vid, "focus set, brought to front");
         }
 
         let (w, h) = self.window_size;
