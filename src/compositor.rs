@@ -7,6 +7,9 @@ use smithay::backend::renderer::Texture;
 use smithay::backend::SwapBuffersError;
 use smithay::backend::winit::WinitGraphicsBackend;
 use smithay::delegate_compositor;
+use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+use smithay::delegate_data_device;
+use smithay::delegate_output;
 use smithay::delegate_seat;
 use smithay::delegate_shm;
 use smithay::delegate_xdg_shell;
@@ -15,6 +18,9 @@ use smithay::input::pointer::{ButtonEvent, CursorImageStatus, MotionEvent, Point
 use smithay::input::Seat;
 use smithay::input::SeatHandler;
 use smithay::input::SeatState;
+use smithay::wayland::selection::data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler};
+use smithay::wayland::output::OutputHandler;
+use smithay::wayland::selection::{SelectionHandler, SelectionTarget};
 use smithay::utils::Logical;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -129,6 +135,7 @@ pub struct LookingGlass {
     pub xdg_shell_state: XdgShellState,
     pub seat_state: SeatState<Self>,
     pub shm_state: ShmState,
+    pub data_device_state: DataDeviceState,
     pub backend: Option<WinitGraphicsBackend<GlesRenderer>>,
     pub toplevels: Vec<ToplevelInfo>,
     pub scene: Scene,
@@ -140,6 +147,7 @@ pub struct LookingGlass {
     /// Registered frame producers (e.g. animated textures, Looking Glass)
     producers: Vec<(VisualId, Box<dyn FrameProducer>)>,
     pub perf: PerfStats,
+    pub output: Option<Output>,
     pub window_size: (f32, f32),
     pub last_mouse: (f64, f64),
     pub last_dx: f64,
@@ -168,14 +176,38 @@ impl LookingGlass {
         let compositor_state = CompositorState::new::<Self>(display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(display_handle);
         let shm_state = ShmState::new::<Self>(display_handle, vec![]);
+        let data_device_state = DataDeviceState::new::<Self>(display_handle);
         let mut seat_state = SeatState::new();
 
         // Create a seat and pointer/keyboard handles for Wayland input routing
-        let mut seat_actual = seat_state.new_seat("default");
+        // Use new_wl_seat to register the wl_seat global (new_seat doesn't register it)
+        let mut seat_actual = seat_state.new_wl_seat(display_handle, "default");
         let pointer_handle = Some(seat_actual.add_pointer());
         // Keyboard handle may fail if no keymap is available; that's OK
         let _keyboard_result = seat_actual.add_keyboard(smithay::input::keyboard::XkbConfig::default(), 0, 0);
         let keyboard_handle = seat_actual.get_keyboard();
+
+        // Create a wl_output global so clients see a monitor
+        let output = Output::new(
+            "LG-NG".into(),
+            PhysicalProperties {
+                size: (338, 270).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Looking Glass".into(),
+                model: "NG Display".into(),
+            },
+        );
+        let _output_global = output.create_global::<Self>(display_handle);
+        output.change_current_state(
+            Some(Mode { size: (1280, 720).into(), refresh: 60000 }),
+            None,
+            Some(Scale::Integer(1)),
+            None,
+        );
+        output.set_preferred(Mode {
+            size: (1280, 720).into(),
+            refresh: 60000,
+        });
 
         LookingGlass {
             display_handle: display_handle.clone(),
@@ -183,6 +215,7 @@ impl LookingGlass {
             xdg_shell_state,
             seat_state,
             shm_state,
+            data_device_state,
             backend: Some(backend),
             toplevels: Vec::new(),
             scene: Scene::default(),
@@ -193,6 +226,7 @@ impl LookingGlass {
             active_workspace: 0,
             producers: Vec::new(),
             perf: PerfStats::new(),
+            output: None,
             window_size: (1280.0, 720.0),
             last_mouse: (0.0, 0.0),
             last_dx: 0.0,
@@ -995,6 +1029,8 @@ impl XdgShellHandler for LookingGlass {
 
 delegate_xdg_shell!(LookingGlass);
 
+impl OutputHandler for LookingGlass {}
+
 impl SeatHandler for LookingGlass {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -1017,6 +1053,20 @@ impl ShmHandler for LookingGlass {
     }
 }
 
+impl SelectionHandler for LookingGlass {
+    type SelectionUserData = ();
+    fn new_selection(&mut self, _ty: SelectionTarget, _source: Option<smithay::wayland::selection::SelectionSource>, _seat: Seat<Self>) {}
+}
+
+impl ClientDndGrabHandler for LookingGlass {}
+impl ServerDndGrabHandler for LookingGlass {}
+
+impl DataDeviceHandler for LookingGlass {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
 impl BufferHandler for LookingGlass {
     fn buffer_destroyed(
         &mut self,
@@ -1026,3 +1076,5 @@ impl BufferHandler for LookingGlass {
 }
 
 delegate_shm!(LookingGlass);
+delegate_output!(LookingGlass);
+delegate_data_device!(LookingGlass);
