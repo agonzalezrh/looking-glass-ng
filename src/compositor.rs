@@ -737,78 +737,61 @@ impl LookingGlass {
     /// Picks the visual via 3D ray cast, computes UV, emits Wayland pointer
     /// motion events. Correctly handles enter/leave transitions via Smithay's
     /// PointerHandle::motion (changing the focus surface triggers leave/enter).
-    /// Clears pointer focus (None) when hovering over non-Wayland content
-    /// or title bars, so the previous surface doesn't keep stale focus.
+    /// Route hover (pointer motion without button) to Wayland surfaces.
+    /// Updates pointer focus based on 3D ray hit testing. Only emits
+    /// enter/leave transitions when the hovered surface ACTUALLY changes
+    /// (debounces against last_wayland_focus). Never clears focus from
+    /// hover alone — that avoids flickering with non-Wayland visuals
+    /// like the KVMFR chess board.
     fn route_hover(&mut self, x: f64, y: f64) {
         let (w, h) = self.window_size;
         if w <= 0.0 || h <= 0.0 { return; }
         let ndc_x = (x as f32 / w) * 2.0 - 1.0;
         let ndc_y = -((y as f32 / h) * 2.0 - 1.0);
         let pv = self.proj_view();
-        let picked = self.scene.pick(&pv, ndc_x, ndc_y);
 
         let ph = match self.pointer_handle.clone() {
             Some(ph) => ph,
             None => return,
         };
 
-        let Some((vid, _dist)) = picked else {
-            // No visual under cursor — clear pointer focus
-            let empty_ev = MotionEvent {
-                location: (0.0, 0.0).into(),
-                serial: smithay::utils::Serial::from(0),
-                time: 0,
-            };
-            ph.motion(self, None, &empty_ev);
-            return;
+        // Pick the visual under cursor via 3D ray cast
+        let picked = self.scene.pick(&pv, ndc_x, ndc_y);
+        let (vid, wl_surface, pos) = match picked {
+            Some((vid, _)) if self.scene.is_active(vid) => {
+                if let Some(wl_surface) = self.wayland_surfaces.get(&vid).cloned() {
+                    if let Some(v) = self.scene.visuals.iter().find(|v| v.id == vid) {
+                        let transform = v.transform.clone();
+                        let total_w = v.total_width();
+                        let total_h = v.total_height();
+                        if let Some((u, uv)) = input_router::screen_to_visual_uv(
+                            &pv, ndc_x, ndc_y, &transform, total_w, total_h,
+                        ) {
+                            let title_frac = 0.06f64 / 1.06f64;
+                            if uv < title_frac { return; } // title bar
+                            let content_v = (uv - title_frac) / (1.0 - title_frac);
+                            let px = u.clamp(0.0, 1.0) * v.geometry.size.w as f64;
+                            let py = content_v.clamp(0.0, 1.0) * v.geometry.size.h as f64;
+                            let pos: smithay::utils::Point<f64, smithay::utils::Logical> = (px, py).into();
+                            (vid, wl_surface, pos)
+                        } else { return; }
+                    } else { return; }
+                } else { return; }
+            }
+            _ => return, // no visual, no Wayland surface, or inactive
         };
 
-        if !self.scene.is_active(vid) { return; }
-
-        // If it's not a Wayland surface, clear focus
-        let wl_surface = match self.wayland_surfaces.get(&vid).cloned() {
-            Some(s) => s,
-            None => {
-                let empty_ev = MotionEvent {
-                    location: (0.0, 0.0).into(),
-                    serial: smithay::utils::Serial::from(0),
-                    time: 0,
-                };
-                ph.motion(self, None, &empty_ev);
-                return;
-            }
-        };
-
-        let data = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| {
-            (v.transform.clone(), v.total_width(), v.total_height())
-        });
-        let Some((transform, total_w, total_h)) = data else { return };
-
-        if let Some((u, v)) = input_router::screen_to_visual_uv(&pv, ndc_x, ndc_y, &transform, total_w, total_h) {
-            let title_frac = 0.06f64 / 1.06f64;
-            if v < title_frac {
-                // Title bar — clear focus
-                let empty_ev = MotionEvent {
-                    location: (0.0, 0.0).into(),
-                    serial: smithay::utils::Serial::from(0),
-                    time: 0,
-                };
-                ph.motion(self, None, &empty_ev);
-                return;
-            }
-            let content_v = (v - title_frac) / (1.0 - title_frac);
-            let gw = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| v.geometry.size.w as f64).unwrap_or(1.0);
-            let gh = self.scene.visuals.iter().find(|v| v.id == vid).map(|v| v.geometry.size.h as f64).unwrap_or(1.0);
-            let px = u.clamp(0.0, 1.0) * gw;
-            let py = content_v.clamp(0.0, 1.0) * gh;
-            let pos: smithay::utils::Point<f64, smithay::utils::Logical> = (px, py).into();
-            let mot_ev = MotionEvent {
-                location: pos,
-                serial: smithay::utils::Serial::from(0),
-                time: 0,
-            };
-            ph.motion(self, Some((wl_surface, pos)), &mot_ev);
+        // Debounce: only emit when the surface actually changes
+        let current_focus = Some(wl_surface.clone());
+        if current_focus != self.last_wayland_focus {
+            self.last_wayland_focus = current_focus;
         }
+        let mot_ev = MotionEvent {
+            location: pos,
+            serial: smithay::utils::Serial::from(0),
+            time: 0,
+        };
+        ph.motion(self, Some((wl_surface, pos)), &mot_ev);
     }
 
     /// Center the camera on the currently selected visual.
